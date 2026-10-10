@@ -9,7 +9,7 @@ pub use multiload_qubes_snapshot::Snapshot;
 
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
-    tooltip: CString,
+    tooltips: [CString; 4],
     tick: u64,
 }
 
@@ -17,7 +17,7 @@ impl Graphs {
     fn new() -> Self {
         Self {
             history: VecDeque::new(),
-            tooltip: CString::new("Waiting for collector").unwrap(),
+            tooltips: tooltips(None, false),
             tick: 0,
         }
     }
@@ -46,31 +46,53 @@ impl Graphs {
                 .and_then(|s| Snapshot::decode_fresh(&s).ok())
         };
         // Repeat a still-fresh sample at the chart interval. Missing/stale data creates a gap.
-        let text = if let Some(s) = &sample {
-            let cpu = s.cpu.map_or("warming up".into(), |v| format!("{v:.1}%"));
-            let gib = |n: u64| n as f64 / 1048576.0;
-            let network = match s.network {
-                Some((rx, tx)) => format!(
-                    "\nNetwork in: {}\nNetwork out: {}",
-                    rate_text(rx),
-                    rate_text(tx)
-                ),
-                None => "\nNetwork: unavailable or warming up".into(),
-            };
-            let swap = swap::tooltip(s.swap.as_ref());
-            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM used = MemTotal − MemAvailable; swap excluded.{}{}",
-                if demo { "DEMO — simulated data\n" } else { "" }, cpu, gib(s.used),
-                gib(s.unknown), gib(s.allocated - s.unknown - s.used),
-                gib(s.allocated), gib(s.total), gib(s.overhead), network, swap)
-        } else {
-            "Metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0.\nNo allocated memory is substituted for actual usage.".into()
-        };
-        self.tooltip = CString::new(text).unwrap();
+        self.tooltips = tooltips(sample.as_ref(), demo);
         self.history.push_back(sample);
         while self.history.len() > 2048 {
             self.history.pop_front();
         }
     }
+}
+
+fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 4] {
+    let text = if let Some(s) = sample {
+        let cpu = s
+            .cpu
+            .map_or("unavailable or warming up".into(), |v| format!("{v:.1}%"));
+        let gib = |n: u64| n as f64 / 1048576.0;
+        let ram = format!("Known used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM used = MemTotal − MemAvailable; swap excluded.",
+            gib(s.used), gib(s.unknown), gib(s.allocated - s.unknown - s.used),
+            gib(s.allocated), gib(s.total), gib(s.overhead));
+        let network = match s.network {
+            Some((rx, tx)) => format!(
+                "Network in: {}\nNetwork out: {}",
+                rate_text(rx),
+                rate_text(tx)
+            ),
+            None => "Network: unavailable or warming up".into(),
+        };
+        [
+            format!("CPU: {cpu}\n100% = all host logical CPUs busy."),
+            ram,
+            network,
+            swap::tooltip(s.swap.as_ref()),
+        ]
+    } else {
+        ["CPU", "RAM", "Network", "Swap"].map(|name| format!(
+            "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0."
+        ))
+    };
+    text.map(|text| {
+        CString::new(format!(
+            "{}{text}",
+            if demo {
+                "DEMO — simulated data\n"
+            } else {
+                ""
+            }
+        ))
+        .unwrap()
+    })
 }
 
 fn rate_text(bytes: f64) -> String {
@@ -208,8 +230,10 @@ pub unsafe extern "C" fn mq_tick(g: *mut Graphs, demo: i32) {
 /// # Safety
 /// `g` must be live; the returned string remains valid until the next tick/free.
 #[no_mangle]
-pub unsafe extern "C" fn mq_tooltip(g: *const Graphs) -> *const c_char {
-    g.as_ref().map_or(std::ptr::null(), |g| g.tooltip.as_ptr())
+pub unsafe extern "C" fn mq_tooltip(g: *const Graphs, kind: i32) -> *const c_char {
+    g.as_ref()
+        .and_then(|g| g.tooltips.get(kind as usize))
+        .map_or(std::ptr::null(), |text| text.as_ptr())
 }
 /// # Safety
 /// `g` and `cr` must be live on the GTK thread. Cairo context is borrowed only.
@@ -282,12 +306,55 @@ mod tests {
         assert_eq!(graphs.network_scale(1), 1024.0);
     }
     #[test]
+    fn tooltips_only_include_the_selected_chart_and_handle_missing_metrics() {
+        let mut graphs = Graphs::new();
+        graphs.update(true);
+        let expected = ["CPU:", "Known used RAM:", "Network in:", "Swap:"];
+        for (kind, label) in expected.iter().enumerate() {
+            let text = graphs.tooltips[kind].to_str().unwrap();
+            assert!(text.contains(label));
+            for (other, other_label) in expected.iter().enumerate() {
+                if other != kind {
+                    assert!(!text.contains(other_label));
+                }
+            }
+            assert!(text.contains("DEMO"));
+            // Verify that the native adapter's kind index selects the same string.
+            assert_eq!(
+                unsafe { mq_tooltip(&graphs, kind as i32) },
+                graphs.tooltips[kind].as_ptr()
+            );
+        }
+        let missing = tooltips(None, false);
+        for (text, label) in missing.iter().zip(["CPU:", "RAM:", "Network:", "Swap:"]) {
+            assert!(text.to_str().unwrap().starts_with(label));
+            assert!(text.to_str().unwrap().contains("unavailable or stale"));
+        }
+        let mut sample = graphs.history.back().unwrap().clone().unwrap();
+        sample.cpu = None;
+        sample.network = None;
+        sample.swap = None;
+        let warming = tooltips(Some(&sample), false);
+        assert!(warming[0].to_str().unwrap().contains("warming up"));
+        assert!(warming[2].to_str().unwrap().contains("warming up"));
+        assert!(warming[3]
+            .to_str()
+            .unwrap()
+            .starts_with("Swap: unavailable"));
+        assert!(unsafe { mq_tooltip(&graphs, -1) }.is_null());
+        assert!(unsafe { mq_tooltip(&graphs, 4) }.is_null());
+    }
+
+    #[test]
     fn bounded_history_and_missing_data() {
         let mut g = Graphs::new();
         for _ in 0..3000 {
             g.update(true);
         }
         assert_eq!(g.history.len(), 2048);
-        assert!(g.tooltip.to_str().unwrap().contains("DEMO"));
+        assert!(g
+            .tooltips
+            .iter()
+            .all(|t| t.to_str().unwrap().contains("DEMO")));
     }
 }

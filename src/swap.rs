@@ -5,12 +5,12 @@ use std::collections::BTreeMap;
 
 pub(crate) fn tooltip(swap: Option<&SwapSnapshot>) -> String {
     let Some(swap) = swap else {
-        return "\nSwap: unavailable (legacy collector)".into();
+        return "Swap: unavailable (legacy collector)".into();
     };
     let total: u128 = swap.entries.iter().map(|e| e.total as u128).sum();
     let used: u128 = swap.entries.iter().map(|e| e.used as u128).sum();
     let mut text = format!(
-        "\nSwap: {:.2} / {:.2} GiB known used / enabled\nSwap reporting: {}/{} domains (including dom0)",
+        "Swap: {:.2} / {:.2} GiB known used / enabled\nSwap reporting: {}/{} domains (including dom0)",
         used as f64 / 1048576.0, total as f64 / 1048576.0,
         swap.entries.len(), swap.expected
     );

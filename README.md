@@ -90,14 +90,16 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.5.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.5.1-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
 Add **Multiload for Qubes** through **Panel Preferences → Items → Add**. It is a
 native panel item, not a notification-area icon. Right-click → Properties changes
 chart width (0 = square), refresh interval, and visible charts. Settings persist
-per panel instance. Vertical panels stack the graphs. At least one stays enabled.
+per panel instance. Hovering a chart shows only its own metrics; moving between
+charts switches the tooltip. Vertical panels stack the graphs and use the same
+per-chart tooltips. At least one chart stays enabled.
 
 To remove it, first remove the panel item, then:
 

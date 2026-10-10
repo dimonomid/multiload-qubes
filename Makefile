@@ -50,8 +50,8 @@ install: all
 rpm:
 	mkdir -p build/rpm/SOURCES
 	$(CARGO) vendor --offline --locked build/vendor > /dev/null
-	tar -czf build/rpm/SOURCES/multiload-qubes-0.5.0-vendor.tar.gz -C build vendor
-	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.5.0,' -czf build/rpm/SOURCES/multiload-qubes-0.5.0.tar.gz .
+	tar -czf build/rpm/SOURCES/multiload-qubes-0.5.1-vendor.tar.gz -C build vendor
+	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.5.1,' -czf build/rpm/SOURCES/multiload-qubes-0.5.1.tar.gz .
 	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' --define '_builddir $(RPM_BUILD_DIR)' packaging/multiload-qubes.spec
 
 clean:

@@ -9,7 +9,7 @@ typedef struct Graphs Graphs;
 extern Graphs *mq_new(void);
 extern void mq_free(Graphs *);
 extern void mq_tick(Graphs *, int);
-extern const char *mq_tooltip(const Graphs *);
+extern const char *mq_tooltip(const Graphs *, int);
 extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int, int, int);
 
 typedef struct {
@@ -36,7 +36,7 @@ static void resize(Plugin *p) {
 static gboolean tick(gpointer data) {
     Plugin *p = data;
     mq_tick(p->graphs, p->demo);
-    gtk_widget_set_tooltip_text(p->area, mq_tooltip(p->graphs));
+    gtk_widget_trigger_tooltip_query(p->area);
     gtk_widget_queue_draw(p->area);
     return G_SOURCE_CONTINUE;
 }
@@ -49,6 +49,38 @@ static gboolean draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
     mq_draw(p->graphs, cr, gtk_widget_get_allocated_width(widget),
             gtk_widget_get_allocated_height(widget), p->cpu, p->ram, p->network, p->swap, p->vertical);
     return FALSE;
+}
+/* Match mq_draw's integer chart sizes, including any unused trailing pixels. */
+static int chart_at(const Plugin *p, int width, int height, int x, int y, GdkRectangle *area) {
+    int enabled[] = {p->cpu, p->ram, p->network, p->swap};
+    int count = p->cpu + p->ram + p->network + p->swap;
+    if (!count || x < 0 || y < 0 || x >= width || y >= height) return -1;
+    int cw = p->vertical ? width : width / count;
+    int ch = p->vertical ? height / count : height;
+    if (cw < 4 || ch < 4) return -1;
+    int index = p->vertical ? y / ch : x / cw;
+    int slot = 0;
+    for (int kind = 0; kind < 4; kind++) {
+        if (!enabled[kind]) continue;
+        if (slot++ == index) {
+            *area = (GdkRectangle){p->vertical ? 0 : index * cw,
+                p->vertical ? index * ch : 0, cw, ch};
+            return kind;
+        }
+    }
+    return -1;
+}
+static gboolean query_tooltip(GtkWidget *widget, gint x, gint y, gboolean keyboard,
+                              GtkTooltip *tooltip, gpointer data) {
+    if (keyboard) return FALSE;
+    Plugin *p = data;
+    GdkRectangle area;
+    int kind = chart_at(p, gtk_widget_get_allocated_width(widget),
+                       gtk_widget_get_allocated_height(widget), x, y, &area);
+    if (kind < 0) return FALSE;
+    gtk_tooltip_set_text(tooltip, mq_tooltip(p->graphs, kind));
+    gtk_tooltip_set_tip_area(tooltip, &area);
+    return TRUE;
 }
 static void save(XfcePanelPlugin *plugin, Plugin *p) {
     char *path = xfce_panel_plugin_save_location(plugin, TRUE);
@@ -163,7 +195,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.5.0",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.5.1",
         "comments", "CPU, RAM, network and per-domain swap graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }
@@ -173,7 +205,9 @@ static Plugin *create(void) {
     p->graphs = mq_new();
     p->area = gtk_drawing_area_new();
     gtk_widget_add_events(p->area, GDK_BUTTON_PRESS_MASK);
+    gtk_widget_set_has_tooltip(p->area, TRUE);
     g_signal_connect(p->area, "draw", G_CALLBACK(draw), p);
+    g_signal_connect(p->area, "query-tooltip", G_CALLBACK(query_tooltip), p);
     return p;
 }
 static void construct(XfcePanelPlugin *plugin) {
@@ -206,6 +240,25 @@ static int self_test(void) {
     g_object_ref_sink(p->plugin);
     gtk_container_add(GTK_CONTAINER(p->plugin), p->area);
     resize(p);
+    /* Hover regions follow rendering with hidden charts, vertical panels and rounding. */
+    GdkRectangle region;
+    g_assert_cmpint(chart_at(p, 130, 49, 0, 0, &region), ==, 0);
+    g_assert_cmpint(chart_at(p, 130, 49, 32, 0, &region), ==, 1);
+    g_assert_cmpint(region.x, ==, 32);
+    g_assert_cmpint(region.width, ==, 32);
+    g_assert_cmpint(chart_at(p, 130, 49, 96, 0, &region), ==, 3);
+    g_assert_cmpint(chart_at(p, 130, 49, 128, 0, &region), ==, -1);
+    g_assert_cmpint(chart_at(p, 130, 49, -1, 0, &region), ==, -1);
+    p->vertical = TRUE;
+    g_assert_cmpint(chart_at(p, 49, 130, 0, 64, &region), ==, 2);
+    g_assert_cmpint(region.y, ==, 64);
+    g_assert_cmpint(chart_at(p, 49, 130, 0, 129, &region), ==, -1);
+    p->vertical = FALSE;
+    p->cpu = p->network = FALSE;
+    g_assert_cmpint(chart_at(p, 130, 49, 0, 0, &region), ==, 1);
+    g_assert_cmpint(chart_at(p, 130, 49, 65, 0, &region), ==, 3);
+    g_assert_cmpint(region.x, ==, 65);
+    p->cpu = p->network = TRUE;
     configure(p->plugin, p);
     Settings *s = g_object_get_data(G_OBJECT(p->dialog), "settings");
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->width), 64);

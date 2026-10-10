@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.5.0
+Version:        0.5.1
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network and swap graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.5.1-1
+- Show chart-specific tooltips for horizontal and vertical panel layouts
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.5.0-1
 - Add per-domain swap lines, maximum fill and reporting coverage over existing RAM streams
 
