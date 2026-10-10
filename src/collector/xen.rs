@@ -73,6 +73,9 @@ struct Api {
     id: Count,
     name: Name,
     cpu: Quantity,
+    vcpus: Count,
+    vcpu: ByIndex,
+    vcpu_online: Count,
     memory: Quantity,
     paused: Count,
     shutdown: Count,
@@ -113,6 +116,22 @@ impl Api {
         ))
     }
 
+    unsafe fn online_vcpus(&self, domain: *mut c_void) -> Option<u32> {
+        let slots = (self.vcpus)(domain);
+        if slots > 65536 {
+            return None;
+        }
+        let mut online = 0;
+        for index in 0..slots {
+            let vcpu = (self.vcpu)(domain, index);
+            if vcpu.is_null() {
+                return None;
+            }
+            online += ((self.vcpu_online)(vcpu) != 0) as u32;
+        }
+        Some(online)
+    }
+
     /// Any present Xen symbols must match the public C ABI. Missing symbols are
     /// rejected; as with all FFI, C signatures cannot be checked at runtime.
     unsafe fn load(library: Library) -> Result<Self, String> {
@@ -137,6 +156,9 @@ impl Api {
             id: symbol!("xenstat_domain_id", Count),
             name: symbol!("xenstat_domain_name", Name),
             cpu: symbol!("xenstat_domain_cpu_ns", Quantity),
+            vcpus: symbol!("xenstat_domain_num_vcpus", Count),
+            vcpu: symbol!("xenstat_domain_vcpu", ByIndex),
+            vcpu_online: symbol!("xenstat_vcpu_online", Count),
             memory: symbol!("xenstat_domain_cur_mem", Quantity),
             paused: symbol!("xenstat_domain_paused", Count),
             shutdown: symbol!("xenstat_domain_shutdown", Count),
@@ -150,6 +172,7 @@ pub struct Xen {
     api: Api,
     handle: NonNull<c_void>,
     xs: NonNull<c_void>,
+    vcpu_unavailable: bool,
 }
 impl Drop for Xen {
     fn drop(&mut self) {
@@ -182,7 +205,12 @@ impl Xen {
             }
             return Err("cannot open XenStore in dom0".into());
         };
-        Ok(Self { api, handle, xs })
+        Ok(Self {
+            api,
+            handle,
+            xs,
+            vcpu_unavailable: false,
+        })
     }
     fn read(&self, path: &str) -> Option<String> {
         let path = CString::new(path).ok()?;
@@ -207,9 +235,25 @@ impl Xen {
         text
     }
     pub fn sample(&mut self) -> Result<Host, String> {
-        // Flags 0 request base domain/host data, not extra network/VBD/vCPU scans.
-        let ptr = NonNull::new(unsafe { (self.api.get_node)(self.handle.as_ptr(), 0) })
+        // XENSTAT_VCPU (1) collects online state for every vCPU slot. If that
+        // scan fails, retain the original base metrics and leave Qube CPU unknown.
+        let detailed = NonNull::new(unsafe { (self.api.get_node)(self.handle.as_ptr(), 1) });
+        let has_vcpus = detailed.is_some();
+        let ptr = detailed
+            .or_else(|| NonNull::new(unsafe { (self.api.get_node)(self.handle.as_ptr(), 0) }))
             .ok_or("cannot read Xen statistics")?;
+        let unavailable = !has_vcpus;
+        if unavailable != self.vcpu_unavailable {
+            eprintln!(
+                "{}",
+                if has_vcpus {
+                    "Xen vCPU metrics recovered"
+                } else {
+                    "Xen vCPU metrics unavailable; using base host/domain statistics"
+                }
+            );
+        }
+        self.vcpu_unavailable = unavailable;
         let node = Node {
             ptr,
             api: &self.api,
@@ -250,6 +294,11 @@ impl Xen {
                     .unwrap_or_default(),
                 name,
                 cpu_ns: unsafe { (self.api.cpu)(d) },
+                vcpus: if has_vcpus {
+                    unsafe { self.api.online_vcpus(d) }
+                } else {
+                    None
+                },
                 allocated: unsafe { (self.api.memory)(d) } / 1024,
                 paused: unsafe { (self.api.paused)(d) } != 0,
                 shutdown: unsafe { (self.api.shutdown)(d) } != 0,
@@ -304,6 +353,9 @@ mod tests {
                 ("xenstat_node_domain_by_index", "xenstat_domain *xenstat_node_domain_by_index(xenstat_node *n, unsigned index) { return (xenstat_domain *)(uintptr_t)3; }"),
                 ("xenstat_domain_id", "unsigned xenstat_domain_id(xenstat_domain *d) { return 23; }"),
                 ("xenstat_domain_name", "char *xenstat_domain_name(xenstat_domain *d) { static char name[]=\"dev\"; return name; }"),
+                ("xenstat_domain_num_vcpus", "unsigned xenstat_domain_num_vcpus(xenstat_domain *d) { return 3; }"),
+                ("xenstat_domain_vcpu", "xenstat_vcpu *xenstat_domain_vcpu(xenstat_domain *d, unsigned i) { return (xenstat_vcpu *)(uintptr_t)(10+i); }"),
+                ("xenstat_vcpu_online", "unsigned xenstat_vcpu_online(xenstat_vcpu *v) { return (uintptr_t)v != 11; }"),
                 ("xenstat_domain_cpu_ns", "unsigned long long xenstat_domain_cpu_ns(xenstat_domain *d) { return 1234567890123ULL; }"),
                 ("xenstat_domain_cur_mem", "unsigned long long xenstat_domain_cur_mem(xenstat_domain *d) { return 2097152ULL; }"),
                 ("xenstat_domain_paused", "unsigned xenstat_domain_paused(xenstat_domain *d) { return 0; }"),
@@ -369,6 +421,7 @@ mod tests {
             let domain = (api.domain)(node.ptr.as_ptr(), 0);
             assert_eq!((api.id)(domain), 23);
             assert_eq!((api.cpu)(domain), 1234567890123);
+            assert_eq!(api.online_vcpus(domain), Some(2));
             assert_eq!(CStr::from_ptr((api.name)(domain)).to_str().unwrap(), "dev");
             drop(node);
             let freed = api

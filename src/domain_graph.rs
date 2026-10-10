@@ -1,4 +1,4 @@
-//! Per-domain RAM and swap display: a fixed percentage scale, never stacked percentages.
+//! Per-domain CPU, RAM and swap display: a fixed percentage scale, never stacked percentages.
 use super::*;
 use multiload_qubes_snapshot::{DomainUsage, DomainUsageSnapshot};
 use std::collections::BTreeMap;
@@ -7,30 +7,35 @@ use std::collections::BTreeMap;
 pub(crate) enum Metric {
     Swap,
     Ram,
+    Cpu,
 }
 impl Metric {
     fn values(self, snapshot: &Snapshot) -> Option<&DomainUsageSnapshot> {
         match self {
             Self::Swap => snapshot.swap.as_ref(),
             Self::Ram => snapshot.qube_ram.as_ref(),
+            Self::Cpu => snapshot.qube_cpu.as_ref().map(|c| &c.usage),
         }
     }
     fn label(self) -> &'static str {
         match self {
             Self::Swap => "Swap",
             Self::Ram => "Qube RAM",
+            Self::Cpu => "Qube CPU",
         }
     }
     fn line_color(self) -> u32 {
         match self {
             Self::Swap => 0x9C43D1,
             Self::Ram => 0x43D18D,
+            Self::Cpu => 0x48BDE6,
         }
     }
     fn fill(self) -> (u32, f64) {
         match self {
             Self::Swap => (0x9C43D1, 0.25),
             Self::Ram => (0x03964F, 0.25),
+            Self::Cpu => (0x036F96, 0.25),
         }
     }
 }
@@ -85,6 +90,38 @@ pub(crate) fn tooltip(usage: Option<&DomainUsageSnapshot>, metric: Metric) -> St
     if metric == Metric::Ram {
         text.push_str("\nUsed = MemTotal − MemAvailable. Ballooning can change the percentage.");
     }
+    text
+}
+
+pub(crate) fn cpu_tooltip(cpu: Option<&multiload_qubes_snapshot::DomainCpuSnapshot>) -> String {
+    let Some(cpu) = cpu else {
+        return "Qube CPU: unavailable or warming up".into();
+    };
+    let mut text = format!(
+        "Qube CPU: reporting {}/{} domains (including dom0)",
+        cpu.usage.entries.len(),
+        cpu.usage.expected
+    );
+    let mut ranked: Vec<_> = cpu.usage.entries.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.percent()
+            .unwrap()
+            .total_cmp(&a.percent().unwrap())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    for e in ranked.into_iter().take(5) {
+        text.push_str(&format!(
+            "\n{}: {:.1}% ({} vCPUs; {:.1}% of host)",
+            e.name,
+            e.percent().unwrap(),
+            cpu.vcpus(e),
+            cpu.host_percent(e)
+        ));
+    }
+    if cpu.usage.entries.len() < cpu.usage.expected as usize {
+        text.push_str("\nMissing or warming-up domains are not treated as idle.");
+    }
+    text.push_str("\n100% = all of that domain's online vCPUs busy. Fill = highest percentage.\nMeasures scheduled CPU time, not time waiting for Xen to schedule it.");
     text
 }
 
@@ -216,6 +253,8 @@ pub(crate) fn demo(t: f64, metric: Metric) -> DomainUsageSnapshot {
             .map(|(name, phase)| {
                 let total = if metric == Metric::Ram {
                     4 * 1048576
+                } else if metric == Metric::Cpu {
+                    (if name == "dom0" { 16 } else { 4 }) * 1_000_000_000
                 } else {
                     1048576
                 };
@@ -227,6 +266,14 @@ pub(crate) fn demo(t: f64, metric: Metric) -> DomainUsageSnapshot {
                 }
             })
             .collect(),
+    }
+}
+
+pub(crate) fn demo_cpu(t: f64) -> multiload_qubes_snapshot::DomainCpuSnapshot {
+    multiload_qubes_snapshot::DomainCpuSnapshot {
+        window_ns: 1_000_000_000,
+        host_cpus: 16,
+        usage: demo(t, Metric::Cpu),
     }
 }
 
@@ -282,6 +329,26 @@ mod tests {
         assert!(text.contains("1/2") && text.contains("dom0: 80.0%"));
         assert!(text.contains("Ballooning") && text.contains("guest-visible"));
         assert!(tooltip(None, Metric::Ram).contains("unavailable"));
+    }
+
+    #[test]
+    fn cpu_lines_break_on_gaps_and_tooltip_shows_qube_and_host_percentages() {
+        let mut g = Graphs::new();
+        g.update(true);
+        let mut sample = g.history[0].clone().unwrap();
+        let cpu = sample.qube_cpu.as_mut().unwrap();
+        cpu.usage.entries.truncate(1);
+        cpu.usage.entries[0].total = 4_000_000_000;
+        cpu.usage.entries[0].used = 2_800_000_000;
+        let text = cpu_tooltip(Some(cpu));
+        assert!(text.contains("70.0% (4 vCPUs; 17.5% of host)"));
+        assert!(text.contains("1/3") && text.contains("warming-up"));
+        assert!(cpu_tooltip(None).contains("warming up"));
+        let mut restarted = sample.clone();
+        restarted.qube_cpu.as_mut().unwrap().usage.entries[0].id = "restarted".into();
+        let lines = traces(&[Some(&sample), None, Some(&restarted)], Metric::Cpu);
+        assert_eq!(lines["dom0"].points, vec![Some(70.0), None, None]);
+        assert_eq!(lines["restarted"].points, vec![None, None, Some(70.0)]);
     }
 
     #[test]

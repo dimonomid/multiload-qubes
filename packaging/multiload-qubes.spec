@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.7.2
+Version:        0.8.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.8.0-1
+- Add per-qube CPU lines using online vCPU counts and show host contributions
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.7.2-1
 - Make the per-qube RAM fill more visible while retaining bright pixel-sharp lines
 

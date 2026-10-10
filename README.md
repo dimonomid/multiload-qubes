@@ -1,6 +1,6 @@
 # Multiload for Qubes
 
-A native GTK3 XFCE panel plugin with scrolling CPU, host RAM, per-qube RAM, network, swap and disk I/O graphs.
+A native GTK3 XFCE panel plugin with scrolling host/per-qube CPU, host/per-qube RAM, network, swap and disk I/O graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
 Rust implements collection, snapshot validation, history and Cairo rendering; a small C
 adapter handles GTK3/XFCE registration, events and settings. The collector CLI uses clap; Cargo.lock pins dependency versions. Slint is not required.
@@ -11,6 +11,12 @@ adapter handles GTK3/XFCE registration, events and settings. The collector CLI u
   wall time and host logical CPU count. 100% means all logical CPUs are busy.
   Includes dom0 and raw supporting domains once; this is scheduled domain CPU
   time, not a measurement of all hypervisor execution overhead.
+- **Qube CPU:** immediately after host CPU, bright blue lines show CPU time
+  divided by elapsed time and each domain's online vCPU count. The fixed scale is
+  0–100% per domain, with a dark-blue maximum fill and pixel-sharp lines, including
+  dom0. The tooltip lists the busiest qubes, online vCPU counts and their host-wide
+  CPU contributions. Scheduling contention can keep a busy qube below 100%; this
+  measures scheduled CPU time rather than time waiting for Xen to schedule it.
 - **RAM used:** green (`#03964F`), `MemTotal − MemAvailable` sampled inside guests
   and dom0. This estimates RAM in use after accounting for reclaimable cache and
   excludes swap.
@@ -103,7 +109,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.7.2-1*.rpm
+sudo dnf install ./multiload-qubes-0.8.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -143,7 +149,7 @@ Only the collector service has Xen privileges; the GUI never runs as root. Rust
 handles CPU accounting, guest connection lifecycle, memory aggregation, validation,
 timeouts and atomic publication at `/run/multiload-qubes/metrics`. Unix descriptor flags and process-group signals use `nix`; scoped SIGINT/SIGTERM
 registrations use `signal-hook`. The systemd unit and collection options remain
-unchanged; MQ5 extends snapshots with per-domain RAM totals and used values. Sampling defaults to 1s; changing the
+unchanged; MQ6 extends snapshots with per-domain CPU budgets and scheduled time. Sampling defaults to 1s; changing the
 panel refresh interval changes chart history sampling, not collection frequency.
 
 The remaining Python code is the small payloads in `guest/memory.py`
@@ -216,13 +222,13 @@ measurements and dom0 packaging must still be validated on the target machine.
 
 Snapshot fields, units, validation and encoding/decoding live in the shared local
 Rust crate `snapshot/`. Both the collector and panel depend on its `Snapshot`
-type. The collector builds a typed snapshot and encodes MQ5; the panel decodes
+type. The collector builds a typed snapshot and encodes MQ6; the panel decodes
 through the same contract and applies the shared freshness policy. The shared
 crate has no Xen or GTK/Cairo dependencies, so the collector keeps its existing
 native dependencies. Atomic file replacement is unchanged.
 
-The decoder accepts MQ1 through MQ5. The encoder writes MQ5 when per-domain RAM
-is present, otherwise MQ4 for disk data, MQ3 for swap, or MQ2. It preserves six timestamp
+The decoder accepts MQ1 through MQ6. The encoder writes MQ6 for per-domain CPU,
+otherwise MQ5 for per-domain RAM, MQ4 for disk data, MQ3 for swap, or MQ2. It preserves six timestamp
 decimals, four CPU decimals and three network/disk rate decimals.
 Structural validation is independent of the clock. The panel additionally allows
 up to five seconds of future clock skew and max(5 seconds, four collection
@@ -237,7 +243,7 @@ entries are comma-separated `incarnation_id:name:total_kib:used_kib` records, or
 `-` if empty. IDs include the Xen domain ID and VM identity to distinguish
 restarts. Names come from dom0 metadata, never guest output; the shared codec
 validates bounded ASCII labels, unique names/IDs, totals and coverage. Files are
-bounded to 64 KiB and 129 entries per domain metric (128 guest readers plus dom0).
+bounded to 96 KiB and 129 entries per domain metric (128 guest readers plus dom0).
 MQ4 appends `read_bytes_per_second write_bytes_per_second disk_devices`. Rates
 are both `unknown` while warming up or with no devices; names are comma-separated,
 or `-` if none. MQ4 permits `unknown -` in the swap extension for missing swap data.
@@ -245,8 +251,12 @@ Disk names are validated ASCII, unique, at most 63 bytes each, with at most 64 d
 MQ5 appends `expected_ram_reporters ram_entries`, with the same bounded
 `incarnation_id:name:total_kib:used_kib` records as swap. RAM totals must be nonzero.
 The disk device token `unknown` represents unavailable disk data in MQ5; `-`
-continues to mean a known empty device list. The GUI continues to accept MQ1–MQ4
-snapshots during upgrades, with absent metrics shown as unavailable.
+continues to mean a known empty device list. MQ6 appends
+`cpu_window_ns host_logical_cpus expected_cpu_domains cpu_entries`. CPU records
+reuse `incarnation_id:name:total:used`: total is the online-vCPU time budget
+(`window_ns * online_vcpus`) and used is scheduled CPU nanoseconds during that
+window. MQ6 permits `unknown -` for absent per-domain RAM. The GUI continues to
+accept MQ1–MQ5 snapshots during upgrades, with absent metrics shown as unavailable.
 
 ## Network collection and upgrading
 
@@ -290,6 +300,40 @@ interface counters inside sys-net. Stop/restart sys-net to check recovery. Real
 qrexec traffic still needs testing on the target dom0; automated tests cover the
 stream reader with local child processes, protocol validation and guest NIC selection.
 
+## Per-qube CPU chart and upgrading
+
+Qube CPU is enabled by default, can be hidden independently in Properties, and
+appears immediately after host CPU in both panel orientations. It shares the
+pixel-sharp domain graph renderer and stable per-name color tints with Qube RAM
+and swap. Lines use multiload-ng's bright CPU blue `#48BDE6`, with a dark `#036F96`
+maximum fill at 25% opacity. Percentages overlap instead of stacking.
+
+The collector requests `XENSTAT_VCPU` data from libxenstat and counts only online
+vCPU slots. All handles remain opaque; additional symbols are loaded through the
+existing checked/owned library API. If detailed sampling fails, the collector
+falls back to the original base snapshot, logs the failure once and its recovery,
+and leaves per-qube CPU unavailable while keeping the other metrics running.
+It requires no guest agent, sampling connection or additional guest process.
+
+CPU percentages use the same monotonic window as host CPU. A domain's own CPU
+percentage is `scheduled_ns / (elapsed_ns * online_vcpus) * 100`; its contribution
+to host load uses the host logical CPU count instead. The collector excludes
+internal stubdomains from per-qube lines but includes their raw time in host CPU.
+At most 129 domains are graphed; the tooltip reports missing/warming-up coverage.
+
+New/restarted domains, vCPU-count changes, resume after pause, unknown vCPU counts
+and counter resets establish fresh baselines rather than false idle values or
+spikes. Tiny scheduling/accounting differences are clamped to the per-domain
+budget. A `--once` snapshot cannot derive per-qube CPU rates from one sample.
+Xen scheduling weights, affinity and caps are not changed; the chart does not
+measure runnable time denied by Xen or work performed in dom0 on a qube's behalf.
+
+After installing v0.8.0, restart the collector and run `xfce4-panel -r`. Compare a
+CPU-loaded qube with its online vCPU count in `xl list`; a four-vCPU qube at 100%
+contributes 25% to a sixteen-logical-CPU host. Live Xen reporting still needs
+checking in dom0; fixtures cover normalization, online counts, resets, restart,
+pause/resume, serialization, chart ordering and settings.
+
 ## Per-qube RAM chart and upgrading
 
 Qube RAM is enabled by default and can be hidden independently in Properties. It
@@ -309,7 +353,7 @@ allocation and unknown usage. Guest totals are not replaced with configured
 maximum memory or Xen allocation. Reclaimable memory is accounted for through
 `MemAvailable`; swap is excluded.
 
-After installing v0.7.2, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.8.0, restart the collector and run `xfce4-panel -r`. Compare a
 qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
 its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
 Qube RAM needs MQ5 data from the updated collector.
@@ -368,7 +412,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.7.2, restart the collector and panel using the commands above.
+After installing v0.8.0, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid

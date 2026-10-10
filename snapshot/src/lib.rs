@@ -1,10 +1,10 @@
 //! Shared collector/panel file contract, independent of Xen and GTK/Cairo.
-//! Memory and swap are KiB, CPU is whole-machine percent, network is bytes/second.
+//! RAM/swap use KiB; per-domain CPU uses scheduled ns / vCPU budget ns.
 use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_WIRE_BYTES: usize = 64 * 1024;
+pub const MAX_WIRE_BYTES: usize = 96 * 1024;
 pub const MAX_DOMAIN_ENTRIES: usize = 129; // 128 guest readers plus dom0.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +35,22 @@ impl DomainUsageSnapshot {
             .iter()
             .filter_map(DomainUsage::percent)
             .reduce(f64::max)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DomainCpuSnapshot {
+    /// Sampling window in nanoseconds; entries use scheduled CPU ns / vCPU budget ns.
+    pub window_ns: u64,
+    pub host_cpus: u32,
+    pub usage: DomainUsageSnapshot,
+}
+impl DomainCpuSnapshot {
+    pub fn vcpus(&self, entry: &DomainUsage) -> u64 {
+        entry.total / self.window_ns
+    }
+    pub fn host_percent(&self, entry: &DomainUsage) -> f64 {
+        entry.used as f64 / self.window_ns as f64 / self.host_cpus as f64 * 100.0
     }
 }
 
@@ -84,6 +100,7 @@ pub struct Snapshot {
     pub disk: Option<DiskSnapshot>,
     /// Current guest-visible RAM totals and usage, including dom0, in KiB.
     pub qube_ram: Option<DomainUsageSnapshot>,
+    pub qube_cpu: Option<DomainCpuSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,7 +114,7 @@ impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => write!(f, "snapshot exceeds {MAX_WIRE_BYTES} bytes"),
-            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4/MQ5 snapshot format"),
+            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4/MQ5/MQ6 snapshot format"),
             Self::InvalidField(field) => write!(f, "invalid snapshot field: {field}"),
             Self::Stale => write!(f, "snapshot is stale or too far in the future"),
         }
@@ -224,7 +241,24 @@ impl Snapshot {
                 return Err(SnapshotError::InvalidField("disk activity"));
             }
         }
-        for (usage, is_ram) in [(&self.swap, false), (&self.qube_ram, true)] {
+        if let Some(cpu) = &self.qube_cpu {
+            if cpu.window_ns == 0
+                || cpu.window_ns > 60_000_000_000
+                || cpu.host_cpus == 0
+                || cpu.usage.entries.iter().any(|e| {
+                    e.total == 0 || e.total % cpu.window_ns != 0 || e.total / cpu.window_ns > 65536
+                })
+            {
+                return Err(SnapshotError::InvalidField(
+                    "per-domain CPU window or vCPUs",
+                ));
+            }
+        }
+        for (usage, is_ram) in [
+            (self.swap.as_ref(), false),
+            (self.qube_ram.as_ref(), true),
+            (self.qube_cpu.as_ref().map(|c| &c.usage), true),
+        ] {
             let Some(swap) = usage else { continue };
             let mut ids = std::collections::BTreeSet::new();
             let mut names = std::collections::BTreeSet::new();
@@ -269,14 +303,16 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Write MQ5 for per-domain RAM, otherwise preserve the MQ2/MQ3/MQ4 layout.
+    /// Write MQ6 for per-domain CPU, otherwise preserve earlier layouts.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
             .cpu
             .map_or_else(|| "unknown".into(), |v| format!("{v:.4}"));
         let network = encode_rates(self.network);
-        let version = if self.qube_ram.is_some() {
+        let version = if self.qube_cpu.is_some() {
+            "MQ6"
+        } else if self.qube_ram.is_some() {
             "MQ5"
         } else if self.disk.is_some() {
             "MQ4"
@@ -305,11 +341,22 @@ impl Snapshot {
                 disk.devices.join(",")
             };
             line.push_str(&format!(" {} {devices}", encode_rates(disk.rates)));
-        } else if version == "MQ5" {
+        } else if matches!(version, "MQ5" | "MQ6") {
             line.push_str(" unknown unknown unknown");
         }
         if let Some(ram) = &self.qube_ram {
             line.push_str(&format!(" {}", encode_domains(Some(ram))));
+        }
+        if let Some(cpu) = &self.qube_cpu {
+            if self.qube_ram.is_none() {
+                line.push_str(" unknown -");
+            }
+            line.push_str(&format!(
+                " {} {} {}",
+                cpu.window_ns,
+                cpu.host_cpus,
+                encode_domains(Some(&cpu.usage))
+            ));
         }
         line.push('\n');
         if line.len() > MAX_WIRE_BYTES {
@@ -328,7 +375,8 @@ impl Snapshot {
             || (p.len() == 11 && p[0] == "MQ2")
             || (p.len() == 13 && p[0] == "MQ3")
             || (p.len() == 16 && p[0] == "MQ4")
-            || (p.len() == 18 && p[0] == "MQ5"))
+            || (p.len() == 18 && p[0] == "MQ5")
+            || (p.len() == 22 && p[0] == "MQ6"))
         {
             return Err(SnapshotError::InvalidFormat);
         }
@@ -337,7 +385,7 @@ impl Snapshot {
         } else {
             decode_rates(p[9], p[10])?
         };
-        let swap = if matches!(p[0], "MQ3" | "MQ4" | "MQ5") {
+        let swap = if matches!(p[0], "MQ3" | "MQ4" | "MQ5" | "MQ6") {
             let value = decode_domains(p[11], p[12])?;
             if p[0] == "MQ3" && value.is_none() {
                 return Err(SnapshotError::InvalidField("swap coverage"));
@@ -346,9 +394,9 @@ impl Snapshot {
         } else {
             None
         };
-        let disk = if matches!(p[0], "MQ4" | "MQ5") {
+        let disk = if matches!(p[0], "MQ4" | "MQ5" | "MQ6") {
             let rates = decode_rates(p[13], p[14])?;
-            if p[0] == "MQ5" && p[15] == "unknown" {
+            if matches!(p[0], "MQ5" | "MQ6") && p[15] == "unknown" {
                 if rates.is_some() {
                     return Err(SnapshotError::InvalidField("unknown disk rates"));
                 }
@@ -366,8 +414,22 @@ impl Snapshot {
         } else {
             None
         };
-        let qube_ram = if p[0] == "MQ5" {
-            Some(decode_domains(p[16], p[17])?.ok_or(SnapshotError::InvalidField("RAM coverage"))?)
+        let qube_ram = if matches!(p[0], "MQ5" | "MQ6") {
+            let ram = decode_domains(p[16], p[17])?;
+            if p[0] == "MQ5" && ram.is_none() {
+                return Err(SnapshotError::InvalidField("RAM coverage"));
+            }
+            ram
+        } else {
+            None
+        };
+        let qube_cpu = if p[0] == "MQ6" {
+            Some(DomainCpuSnapshot {
+                window_ns: field(p[18], "CPU sampling window ns")?,
+                host_cpus: field(p[19], "host logical CPU count")?,
+                usage: decode_domains(p[20], p[21])?
+                    .ok_or(SnapshotError::InvalidField("CPU coverage"))?,
+            })
         } else {
             None
         };
@@ -388,6 +450,7 @@ impl Snapshot {
             swap,
             disk,
             qube_ram,
+            qube_cpu,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -665,6 +728,56 @@ mod tests {
         let duplicate = s.qube_ram.as_ref().unwrap().entries[0].clone();
         s.qube_ram.as_mut().unwrap().entries.push(duplicate);
         assert!(s.encode().is_err());
+    }
+
+    #[test]
+    fn mq6_preserves_cpu_time_budgets_vcpus_and_host_contribution() {
+        let mut s = Snapshot::decode(MQ2).unwrap();
+        s.qube_cpu = Some(DomainCpuSnapshot {
+            window_ns: 1_000_000_000,
+            host_cpus: 16,
+            usage: DomainUsageSnapshot {
+                expected: 2,
+                entries: vec![DomainUsage {
+                    id: "1/vm-a".into(),
+                    name: "work".into(),
+                    total: 4_000_000_000,
+                    used: 2_800_000_000,
+                }],
+            },
+        });
+        let wire = s.encode().unwrap();
+        assert!(wire.starts_with("MQ6 "));
+        assert_eq!(Snapshot::decode(&wire).unwrap(), s);
+        let cpu = s.qube_cpu.as_ref().unwrap();
+        assert_eq!(cpu.usage.entries[0].percent(), Some(70.0));
+        assert_eq!(cpu.vcpus(&cpu.usage.entries[0]), 4);
+        assert!((cpu.host_percent(&cpu.usage.entries[0]) - 17.5).abs() < 1e-9);
+        assert!(Snapshot::decode_fresh_at(&wire, 1005.5).is_ok());
+        assert_eq!(
+            Snapshot::decode_fresh_at(&wire, 1006.0),
+            Err(SnapshotError::Stale)
+        );
+        for (before, after) in [
+            ("1000000000 16", "0 16"),
+            ("1000000000 16", "1000000000 0"),
+            ("4000000000:2800000000", "4000000001:2800000000"),
+            ("4000000000:2800000000", "4000000000:4000000001"),
+        ] {
+            assert!(Snapshot::decode(&wire.replace(before, after)).is_err());
+        }
+        s.qube_cpu.as_mut().unwrap().usage.entries.clear();
+        assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
+        s.qube_ram = Some(DomainUsageSnapshot {
+            expected: 1,
+            entries: vec![DomainUsage {
+                id: "dom0".into(),
+                name: "dom0".into(),
+                total: 1000,
+                used: 400,
+            }],
+        });
+        assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
     }
 
     #[test]

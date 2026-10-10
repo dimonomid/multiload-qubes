@@ -5,7 +5,9 @@ mod shutdown;
 pub mod stream;
 pub mod xen;
 
-use multiload_qubes_snapshot::{unix_time_now, DomainUsage, DomainUsageSnapshot, Snapshot};
+use multiload_qubes_snapshot::{
+    unix_time_now, DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot, Snapshot,
+};
 use protocol::{Kind, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -21,6 +23,7 @@ pub struct Domain {
     pub identity: String,
     pub name: String,
     pub cpu_ns: u64,
+    pub vcpus: Option<u32>,
     pub allocated: u64,
     pub paused: bool,
     pub shutdown: bool,
@@ -36,24 +39,73 @@ pub struct Host {
 
 #[derive(Default)]
 pub struct CpuTracker {
-    previous: BTreeMap<(u32, String), u64>,
+    previous: BTreeMap<(u32, String), (u64, Option<u32>, bool)>,
+    per_domain: Option<DomainCpuSnapshot>,
     time: Option<Duration>,
 }
 impl CpuTracker {
     pub fn update(&mut self, host: &Host, now: Duration) -> Option<f64> {
         let mut delta = 0.0;
         let mut current = BTreeMap::new();
+        let active = eligible(host);
+        let window_ns = self
+            .time
+            .and_then(|t| now.checked_sub(t))
+            .and_then(|d| u64::try_from(d.as_nanos()).ok())
+            .filter(|n| *n > 0 && *n <= 60_000_000_000);
+        let mut usage = DomainUsageSnapshot {
+            expected: active.len() as u32 + 1,
+            entries: Vec::new(),
+        };
         for domain in &host.domains {
             let key = (domain.id, domain.identity.clone());
-            if let Some(before) = self.previous.get(&key) {
+            let reporting = !domain.paused
+                && !domain.shutdown
+                && (domain.id == 0 || active.contains_key(&domain.id));
+            if let Some((before, old_vcpus, was_reporting)) = self.previous.get(&key) {
                 delta += domain.cpu_ns.saturating_sub(*before) as f64;
+                if reporting
+                    && *was_reporting
+                    && domain.vcpus == *old_vcpus
+                    && usage.entries.len() < multiload_qubes_snapshot::MAX_DOMAIN_ENTRIES
+                {
+                    if let (Some(window), Some(vcpus), Some(used)) = (
+                        window_ns,
+                        domain.vcpus.filter(|n| *n > 0),
+                        domain.cpu_ns.checked_sub(*before),
+                    ) {
+                        if let Some(total) = window.checked_mul(vcpus as u64) {
+                            usage.entries.push(DomainUsage {
+                                id: if domain.id == 0 {
+                                    "dom0".into()
+                                } else {
+                                    format!("{}/{}", domain.id, domain.identity)
+                                },
+                                name: if domain.id == 0 {
+                                    "dom0".into()
+                                } else {
+                                    domain.name.clone()
+                                },
+                                total,
+                                used: used.min(total),
+                            });
+                        }
+                    }
+                }
             }
-            current.insert(key, domain.cpu_ns);
+            current.insert(key, (domain.cpu_ns, domain.vcpus, reporting));
         }
         let elapsed = self
             .time
             .and_then(|t| now.checked_sub(t))
             .map(|t| t.as_secs_f64());
+        self.per_domain = window_ns
+            .filter(|_| host.cpus > 0)
+            .map(|window_ns| DomainCpuSnapshot {
+                window_ns,
+                host_cpus: host.cpus,
+                usage,
+            });
         self.previous = current;
         self.time = Some(now);
         match elapsed {
@@ -270,6 +322,7 @@ pub fn snapshot(
         period,
         swap: None,
         qube_ram: None,
+        qube_cpu: None,
         disk: None,
         network: match network {
             Some(Reading::Network(rx, tx)) => Some((rx, tx)),
@@ -361,7 +414,7 @@ pub fn run(options: Options) -> Result<(), String> {
         let tick = Instant::now();
         let result = (|| {
             let host = xen.sample()?;
-            let cpu = cpu.update(&host, start.elapsed());
+            let cpu_usage = cpu.update(&host, start.elapsed());
             let readings = if let Some(pool) = &mut memory {
                 pool.sync(&host);
                 pool.readings(&host)
@@ -374,7 +427,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 &host,
                 dom0.1,
                 &readings,
-                cpu,
+                cpu_usage,
                 network.as_ref().and_then(Reader::value),
                 options.interval,
             )?;
@@ -383,6 +436,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 protocol::dom0_swap(&meminfo)?,
                 memory.as_ref(),
             ));
+            data.qube_cpu = cpu.per_domain.clone();
             data.qube_ram = Some(ram_snapshot(&host, dom0, memory.as_ref()));
             data.disk = disk.sample(start.elapsed());
             publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
@@ -411,6 +465,7 @@ mod tests {
             identity: format!("uuid-{id}"),
             name: format!("qube-{id}"),
             cpu_ns: 0,
+            vcpus: Some(2),
             allocated: 1000,
             paused: false,
             shutdown: false,
@@ -442,6 +497,63 @@ mod tests {
         assert_eq!(cpu.update(&h, Duration::from_secs(4)), Some(25.0));
         assert_eq!(cpu.update(&h, Duration::from_secs(4)), None);
     }
+    #[test]
+    fn per_qube_cpu_normalizes_vcpus_and_handles_resize_pause_restart_and_reset() {
+        let mut h = host();
+        h.cpus = 16;
+        h.domains[0].vcpus = Some(16);
+        h.domains[1].vcpus = Some(4);
+        h.domains[2].paused = true;
+        let mut t = CpuTracker::default();
+        assert_eq!(t.update(&h, Duration::ZERO), None);
+        assert!(t.per_domain.is_none());
+        h.domains[0].cpu_ns = 10_880_000_000;
+        h.domains[1].cpu_ns = 2_800_000_000;
+        assert!((t.update(&h, Duration::from_secs(1)).unwrap() - 85.5).abs() < 1e-9);
+        let cpu = t.per_domain.as_ref().unwrap();
+        assert_eq!(cpu.usage.expected, 2);
+        let guest = cpu
+            .usage
+            .entries
+            .iter()
+            .find(|e| e.name == "qube-1")
+            .unwrap();
+        assert_eq!(cpu.vcpus(guest), 4);
+        assert_eq!(guest.percent(), Some(70.0));
+        assert!((cpu.host_percent(guest) - 17.5).abs() < 1e-9);
+        h.domains[1].vcpus = Some(2);
+        h.domains[1].cpu_ns += 1_400_000_000;
+        t.update(&h, Duration::from_secs(2));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.entries.len(), 1);
+        h.domains[1].cpu_ns += 1_400_000_000;
+        t.update(&h, Duration::from_secs(3));
+        assert_eq!(
+            t.per_domain.as_ref().unwrap().usage.entries[1].percent(),
+            Some(70.0)
+        );
+        h.domains[1].paused = true;
+        t.update(&h, Duration::from_secs(4));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.expected, 1);
+        h.domains[1].paused = false;
+        t.update(&h, Duration::from_secs(5));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.entries.len(), 1);
+        h.domains[1].identity = "new-uuid".into();
+        t.update(&h, Duration::from_secs(6));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.entries.len(), 1);
+        h.domains[1].cpu_ns += 2_000_000_000;
+        t.update(&h, Duration::from_secs(7));
+        let guest = &t.per_domain.as_ref().unwrap().usage.entries[1];
+        assert_eq!(guest.percent(), Some(100.0));
+        assert!(guest.id.contains("new-uuid"));
+        h.domains[1].cpu_ns = 0;
+        t.update(&h, Duration::from_secs(8));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.entries.len(), 1);
+        h.domains[1].vcpus = None;
+        t.update(&h, Duration::from_secs(9));
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.expected, 2);
+        assert_eq!(t.per_domain.as_ref().unwrap().usage.entries.len(), 1);
+    }
+
     #[test]
     fn aggregation_unknown_and_ballooning() {
         let h = host();

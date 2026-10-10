@@ -10,7 +10,7 @@ pub use multiload_qubes_snapshot::Snapshot;
 
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
-    tooltips: [CString; 6],
+    tooltips: [CString; 7],
     tooltip_view: CString,
     tick: u64,
 }
@@ -31,6 +31,7 @@ impl Graphs {
             Some(Snapshot {
                 timestamp: self.tick as f64,
                 cpu: Some(35.0 + t.sin() * 25.0),
+                qube_cpu: Some(domain_graph::demo_cpu(t * 0.9)),
                 total: 32 * 1048576,
                 allocated: 24 * 1048576,
                 used: ((10.0 + t.cos() * 3.0) * 1048576.0) as u64,
@@ -65,7 +66,7 @@ impl Graphs {
     }
 }
 
-fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 6] {
+fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 7] {
     let text = if let Some(s) = sample {
         let cpu = s
             .cpu
@@ -111,9 +112,10 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 6] {
             domain_graph::tooltip(s.swap.as_ref(), Metric::Swap),
             disk,
             domain_graph::tooltip(s.qube_ram.as_ref(), Metric::Ram),
+            domain_graph::cpu_tooltip(s.qube_cpu.as_ref()),
         ]
     } else {
-        ["CPU", "RAM", "Network", "Swap", "Disk", "Qube RAM"].map(|name| format!(
+        ["CPU", "RAM", "Network", "Swap", "Disk", "Qube RAM", "Qube CPU"].map(|name| format!(
             "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0."
         ))
     };
@@ -203,12 +205,16 @@ impl Graphs {
                 | (((top & 255) as f64 * scale) as u32);
             rect(cr, c, 1.0, y as f64, w - 2.0, 1.0);
         }
-        if kind == 3 || kind == 5 {
+        if matches!(kind, 3 | 5 | 6) {
             self.domain_chart(
                 cr,
                 width,
                 height,
-                if kind == 5 { Metric::Ram } else { Metric::Swap },
+                match kind {
+                    6 => Metric::Cpu,
+                    5 => Metric::Ram,
+                    _ => Metric::Swap,
+                },
             );
             return;
         }
@@ -320,6 +326,7 @@ pub unsafe extern "C" fn mq_draw(
     width: i32,
     height: i32,
     cpu: i32,
+    qube_cpu: i32,
     ram: i32,
     qube_ram: i32,
     network: i32,
@@ -334,6 +341,7 @@ pub unsafe extern "C" fn mq_draw(
         return;
     }
     let count = (cpu != 0) as i32
+        + (qube_cpu != 0) as i32
         + (ram != 0) as i32
         + (qube_ram != 0) as i32
         + (network != 0) as i32
@@ -356,6 +364,7 @@ pub unsafe extern "C" fn mq_draw(
     let mut index = 0;
     for (enabled, kind) in [
         (cpu, 0),
+        (qube_cpu, 6),
         (ram, 1),
         (qube_ram, 5),
         (network, 2),
@@ -438,13 +447,15 @@ mod tests {
             "Swap:",
             "Disk read:",
             "Qube RAM:",
+            "Qube CPU:",
         ];
         for (kind, label) in expected.iter().enumerate() {
             let text = graphs.tooltips[kind].to_str().unwrap();
-            assert!(text.contains(label));
+            let body = text.strip_prefix("DEMO — simulated data\n").unwrap();
+            assert!(body.starts_with(label));
             for (other, other_label) in expected.iter().enumerate() {
                 if other != kind {
-                    assert!(!text.contains(other_label));
+                    assert!(!body.lines().any(|line| line.starts_with(other_label)));
                 }
             }
             assert!(text.contains("DEMO"));
@@ -455,11 +466,15 @@ mod tests {
             );
         }
         let missing = tooltips(None, false);
-        for (text, label) in
-            missing
-                .iter()
-                .zip(["CPU:", "RAM:", "Network:", "Swap:", "Disk:", "Qube RAM:"])
-        {
+        for (text, label) in missing.iter().zip([
+            "CPU:",
+            "RAM:",
+            "Network:",
+            "Swap:",
+            "Disk:",
+            "Qube RAM:",
+            "Qube CPU:",
+        ]) {
             assert!(text.to_str().unwrap().starts_with(label));
             assert!(text.to_str().unwrap().contains("unavailable or stale"));
         }
@@ -475,7 +490,7 @@ mod tests {
             .unwrap()
             .starts_with("Swap: unavailable"));
         assert!(unsafe { mq_tooltip(&mut graphs, -1, 120) }.is_null());
-        assert!(unsafe { mq_tooltip(&mut graphs, 6, 120) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, 7, 120) }.is_null());
     }
 
     #[test]
