@@ -75,7 +75,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.1-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.2-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -105,8 +105,9 @@ libxenstat soname. Runtime Xen libraries come from `xen-libs`; building needs
 
 Only the collector service has Xen privileges; the GUI never runs as root. Rust
 handles CPU accounting, guest connection lifecycle, memory aggregation, validation,
-timeouts and atomic publication at `/run/multiload-qubes/metrics`. Its CLI, systemd
-unit and MQ2 snapshot format are unchanged. Sampling defaults to 1s; changing the
+timeouts and atomic publication at `/run/multiload-qubes/metrics`. Unix descriptor flags and process-group signals use `nix`; scoped SIGINT/SIGTERM
+registrations use `signal-hook`. Its CLI, systemd unit and MQ2 snapshot format
+are unchanged. Sampling defaults to 1s; changing the
 panel refresh interval changes chart history sampling, not collection frequency.
 
 The remaining Python code is the small, unchanged payloads in `guest/memory.py`

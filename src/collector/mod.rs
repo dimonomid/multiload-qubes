@@ -1,4 +1,5 @@
 pub mod protocol;
+mod shutdown;
 pub mod stream;
 pub mod xen;
 
@@ -8,7 +9,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use stream::{CommandSpec, Reader, Timing};
 
@@ -252,14 +252,6 @@ pub fn publish(path: &Path, text: &str) -> Result<(), String> {
     result.map_err(|e| e.to_string())
 }
 
-pub static STOP: AtomicBool = AtomicBool::new(false);
-extern "C" fn stop(_: i32) {
-    STOP.store(true, Ordering::Relaxed);
-}
-extern "C" {
-    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
-}
-
 pub struct Options {
     pub once: bool,
     pub interval: f64,
@@ -287,11 +279,8 @@ pub fn run(options: Options) -> Result<(), String> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    unsafe {
-        if signal(2, stop) == usize::MAX || signal(15, stop) == usize::MAX {
-            return Err("cannot install signal handlers".into());
-        }
-    }
+    let shutdown = shutdown::Shutdown::register()
+        .map_err(|e| format!("Cannot install signal handlers: {e}"))?;
     let network = options
         .network
         .map(|name| {
@@ -304,7 +293,7 @@ pub fn run(options: Options) -> Result<(), String> {
         .transpose()
         .map_err(|e| e.to_string())?;
     let mut memory = options.memory.then(MemoryPool::new);
-    while !STOP.load(Ordering::Relaxed) {
+    while !shutdown.requested() {
         let tick = Instant::now();
         let result = (|| {
             let host = xen.sample()?;
@@ -331,7 +320,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
         }
-        while !STOP.load(Ordering::Relaxed) && tick.elapsed().as_secs_f64() < options.interval {
+        while !shutdown.requested() && tick.elapsed().as_secs_f64() < options.interval {
             std::thread::sleep(Duration::from_millis(20));
         }
     }

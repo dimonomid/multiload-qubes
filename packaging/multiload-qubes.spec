@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.4.1
+Version:        0.4.2
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.2-1
+- Use nix and signal-hook for Unix operations and scoped shutdown handling
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.1-1
 - Replace custom CLI parsing with clap; bundle dependencies for offline RPM builds
 

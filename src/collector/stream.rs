@@ -1,7 +1,10 @@
 use super::protocol::{shell_quote, Kind, Reading, Tracker, MEMORY_SCRIPT, NETWORK_SCRIPT};
-use std::ffi::c_int;
+use nix::errno::Errno;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::signal::{killpg, Signal};
+use nix::unistd::Pid;
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -10,11 +13,6 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-extern "C" {
-    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
-    fn kill(pid: c_int, signal: c_int) -> c_int;
-}
 
 #[derive(Clone)]
 pub struct CommandSpec {
@@ -57,12 +55,19 @@ impl Default for Timing {
 // Dropping on any error/stop terminates the entire local qvm-run process group.
 // Guest scripts then exit on their next write to the closed stdout connection.
 struct Process(Child);
+impl Process {
+    fn signal_group(&self, signal: Signal) {
+        let group = Pid::from_raw(self.0.id() as i32);
+        if let Err(error) = killpg(group, signal) {
+            if error != Errno::ESRCH {
+                eprintln!("Cannot send {signal} to guest process group {group}: {error}");
+            }
+        }
+    }
+}
 impl Drop for Process {
     fn drop(&mut self) {
-        let pid = self.0.id() as i32;
-        unsafe {
-            kill(-pid, 15);
-        }
+        self.signal_group(Signal::SIGTERM);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match self.0.try_wait() {
@@ -71,11 +76,15 @@ impl Drop for Process {
                 _ => thread::sleep(Duration::from_millis(20)),
             }
         }
-        unsafe {
-            kill(-pid, 9);
-        }
+        self.signal_group(Signal::SIGKILL);
         let _ = self.0.wait();
     }
+}
+
+fn set_nonblocking(fd: &impl AsFd) -> Result<(), Errno> {
+    let flags = OFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFL)?);
+    fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    Ok(())
 }
 
 type Latest = Arc<Mutex<Option<(Instant, Option<Reading>)>>>;
@@ -148,11 +157,7 @@ fn session(
         .process_group(0);
     let mut proc = Process(command.spawn().map_err(|e| e.to_string())?);
     let mut stdout = proc.0.stdout.take().ok_or("missing stdout")?;
-    // Linux F_GETFL/F_SETFL and O_NONBLOCK. A fixed buffer bounds untrusted input.
-    let flags = unsafe { fcntl(stdout.as_raw_fd(), 3) };
-    if flags < 0 || unsafe { fcntl(stdout.as_raw_fd(), 4, flags | 0x800) } < 0 {
-        return Err(io::Error::last_os_error().to_string());
-    }
+    set_nonblocking(&stdout).map_err(|e| e.to_string())?;
     let mut tracker = Tracker::new(kind);
     let mut buffer = Vec::new();
     let mut chunk = [0; 4096];
@@ -200,6 +205,90 @@ fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn_process(script: &str) -> Process {
+        Process(
+            Command::new("python3")
+                .args(["-u", "-c", script])
+                .stdout(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        )
+    }
+    fn ready_line(proc: &mut Process) -> String {
+        let mut stdout = proc.0.stdout.take().unwrap();
+        set_nonblocking(&stdout).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut result = Vec::new();
+        loop {
+            let mut byte = [0];
+            match stdout.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => return String::from_utf8(result).unwrap(),
+                Ok(1) => result.push(byte[0]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                other => panic!("unexpected helper output: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "process helper did not become ready"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn nonblocking_pipe_preserves_flags_and_transfers_data() {
+        let (read, write) = nix::unistd::pipe().unwrap();
+        let before = OFlag::from_bits_retain(fcntl(&read, FcntlArg::F_GETFL).unwrap());
+        set_nonblocking(&read).unwrap();
+        let after = OFlag::from_bits_retain(fcntl(&read, FcntlArg::F_GETFL).unwrap());
+        assert!(after.contains(OFlag::O_NONBLOCK));
+        assert_eq!(after & !OFlag::O_NONBLOCK, before & !OFlag::O_NONBLOCK);
+        let mut read = std::fs::File::from(read);
+        let mut buf = [0];
+        assert_eq!(
+            read.read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        nix::unistd::write(&write, b"x").unwrap();
+        assert_eq!(read.read(&mut buf).unwrap(), 1);
+        assert_eq!(buf, [b'x']);
+    }
+    #[test]
+    fn process_cleanup_terminates_the_group_and_reaps_parent() {
+        let mut proc = spawn_process("import subprocess, sys, time; child=subprocess.Popen([sys.executable,'-u','-c',\"import time; print('ready',flush=True); time.sleep(20)\"],stdout=subprocess.PIPE); child.stdout.readline(); print(child.pid,flush=True); time.sleep(20)");
+        let parent = Pid::from_raw(proc.0.id() as i32);
+        let child: u32 = ready_line(&mut proc).parse().unwrap();
+        drop(proc);
+        assert_eq!(nix::sys::signal::kill(parent, None), Err(Errno::ESRCH));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).ok();
+            // A terminated orphan can remain a zombie until its new parent reaps it.
+            if stat.as_ref().is_none_or(|s| {
+                s.split_once(") ")
+                    .is_some_and(|(_, state)| state.starts_with('Z'))
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "descendant survived process-group cleanup"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn process_cleanup_escalates_when_term_is_ignored() {
+        let mut proc = spawn_process("import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(20)");
+        let pid = Pid::from_raw(proc.0.id() as i32);
+        assert_eq!(ready_line(&mut proc), "ready");
+        let start = Instant::now();
+        drop(proc);
+        assert!(start.elapsed() >= Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(4));
+        assert_eq!(nix::sys::signal::kill(pid, None), Err(Errno::ESRCH));
+    }
     fn spec(script: &str) -> CommandSpec {
         CommandSpec {
             program: "python3".into(),
