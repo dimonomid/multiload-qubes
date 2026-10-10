@@ -1,0 +1,21 @@
+[Unit]
+Description=Read-only Xen statistics for Multiload for Qubes
+After=qubes-qmemman.service xenstored.service
+ConditionPathExists=/dev/xen/privcmd
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/multiload-qubes-collector
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=multiload-qubes
+RuntimeDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

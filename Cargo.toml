@@ -1,0 +1,14 @@
+[package]
+name = "multiload-qubes"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Whole-machine Qubes CPU and memory graphs for the XFCE panel"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

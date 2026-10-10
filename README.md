@@ -1,0 +1,146 @@
+# Multiload for Qubes
+
+A native GTK3 XFCE panel plugin with scrolling whole-machine CPU and RAM graphs.
+Both charts are one panel item: move them together using XFCE's normal menu.
+Rust implements snapshot validation, history and Cairo rendering; a small C
+adapter handles GTK3/XFCE registration, events and settings. No Cargo dependencies
+or network access are needed to build. Slint is not required.
+
+## Graphs
+
+- **CPU:** blue (`#036F96`), the change in Xen domain CPU time divided by elapsed
+  wall time and host logical CPU count. 100% means all logical CPUs are busy.
+  Includes dom0 and raw supporting domains once; this is scheduled domain CPU
+  time, not a measurement of all hypervisor execution overhead.
+- **RAM used:** green (`#03964F`), resident non-cache usage reported by guests,
+  plus dom0, excluding swap.
+- **RAM allocated spare:** lighter green (`#43D18D`), current Xen allocation with known usage minus
+  known used RAM. This includes cache and buffers as well as free memory inside guests.
+  This is current allocation, never configured `maxmem`.
+- **Unknown usage:** red (`#D14343`, multiload-ng’s load color) portion within allocation when a guest does not provide
+  the required reports. Used is then a lower bound, identified in the tooltip.
+- RAM is scaled against Xen's physical total. The tooltip separately lists Xen
+  and unattributed overhead. That overhead is not painted as guest-used RAM.
+- Stale/missing snapshots produce gaps with grey baseline marks, not fake zeroes.
+
+Colors, borders and dark gradient backgrounds match multiload-ng's default
+palette: <https://github.com/udda/multiload-ng/blob/master/common/colors.c>.
+The implementation is new; LICENSE contains GPL-2.0, with this project licensed
+under GPL-2.0-or-later.
+
+## Build on the development machine
+
+```bash
+sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel
+make
+make test
+```
+
+Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
+Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.
+These test the shared plugin entry point and widget lifecycle, as well as settings
+and persistence, using an isolated virtual display and temporary configuration.
+Rust/Cargo and the development dependencies have already been installed on this
+development machine. The plugin is not installed in your panel automatically.
+
+Run `build/multiload-qubes-preview` for a clearly labelled **simulated** preview.
+It does not require Xen or alter the panel. For an image without a display:
+
+```bash
+build/multiload-qubes-preview --render build/preview.png
+```
+
+## Build an RPM for dom0
+
+```bash
+sudo dnf install rpm-build systemd-rpm-macros
+make rpm
+```
+
+RPMs and a source RPM are written under `build/rpm/`. **Build against your dom0
+distribution**, typically in a matching disposable build VM. An RPM compiled on
+this Fedora 43 development machine is not guaranteed to run on an older dom0:
+Rust, GLib, GTK and glibc minimum versions can differ. Use the source RPM or source
+tree in the matching build environment. No Rust compiler is needed at runtime.
+
+Transfer the resulting matching RPM into dom0 through your normal Qubes file
+transfer procedure. In dom0:
+
+```bash
+sudo dnf install ./multiload-qubes-0.1.0-1*.rpm
+sudo systemctl enable --now multiload-qubes-collector.service
+```
+
+Add **Multiload for Qubes** through **Panel Preferences → Items → Add**. It is a
+native panel item, not a notification-area icon. Right-click → Properties changes
+chart width (0 = square), refresh interval, and visible charts. Settings persist
+per panel instance. Vertical panels stack the graphs. At least one stays enabled.
+
+To remove it, first remove the panel item, then:
+
+```bash
+sudo systemctl disable --now multiload-qubes-collector.service
+sudo dnf remove multiload-qubes
+```
+
+For a staged install without touching the system: `make install DESTDIR=/tmp/mq-stage`.
+
+## Collector and memory semantics
+
+A small Python service uses the Xen bindings already used by Qubes
+(`python3-xen`). Only the service has Xen privileges; the GUI never runs as root.
+It reads Xen counters and XenStore, and atomically publishes a bounded numeric
+snapshot at `/run/multiload-qubes/metrics`. It does not run guest commands, alter
+balloon targets, change XenStore keys, or modify qmemman. Sampling defaults to 1s;
+the panel's refresh interval changes history sampling, not collector frequency.
+
+The Qubes memory writer computes:
+
+```text
+memory/meminfo  = guest current RAM - free - buffers - cache + used swap
+memory/swapinfo = used swap
+resident used  = meminfo - swapinfo
+```
+
+Source: <https://github.com/QubesOS/qubes-linux-utils/blob/main/qmemman/meminfo-writer.c>.
+Dom0 uses the same resident formula from `/proc/meminfo`. This is a useful
+non-cache RAM estimate, not process RSS summed together and not exactly the modern
+`free` definition based on `MemAvailable`.
+
+Reports are thresholded (often around 30 MiB), and memory/swap reports can update
+independently, so small changes may lag. Results are clamped to current allocation
+during balloon changes. **Older agents without `memory/swapinfo`, guests with
+memory reporting disabled (often PCI/device qubes), and unsupported guests are
+shown as unknown**. The collector does not assume zero swap or silently replace
+actual usage with allocation. A complete whole-machine used value requires both
+reports for every guest. Unchanged XenStore values cannot reliably be distinguished
+from a guest reporter that stopped; the tooltip describes them as guest reports.
+
+## Validation in dom0
+
+Automated tests and a graphical preview can run in a normal dev VM. Real Xen
+measurements and dom0 packaging must still be validated on the target machine.
+
+1. Run `sudo /usr/libexec/multiload-qubes-collector --once`. `unknown` CPU on the
+   first sample is expected: CPU needs two counter samples.
+2. Check service status and its file:
+   `systemctl status multiload-qubes-collector` and
+   `cat /run/multiload-qubes/metrics`.
+3. Compare physical total/free with `sudo xl info`, and current allocations with
+   `sudo xl list`. The snapshot uses KiB; `xl list` commonly displays MiB.
+4. For a running test qube, inspect both XenStore memory keys from dom0 using its
+   domid: `sudo xenstore-read /local/domain/DOMID/memory/meminfo` and the corresponding
+   `swapinfo`. Missing keys explain red allocations.
+5. In that qube, compare `/proc/meminfo` using the formula above. Touch a bounded
+   allocation (e.g. 256 MiB), then release it; allow for writer thresholds.
+   Repeat with swap active to verify that swap is excluded.
+6. Exercise CPU load, start/stop qubes, ballooning, vertical orientation, panel
+   restart, Properties, persisted settings, and service stop/restart. Data should
+   become unavailable within a few seconds of collector failure.
+7. Check idle overhead with `top`/`ps` on the collector and XFCE plugin wrapper.
+
+The versioned snapshot format is:
+`MQ1 unix_timestamp cpu_percent|unknown total_kib allocated_kib used_kib unknown_allocation_kib overhead_kib collector_period_seconds`.
+No per-qube names or guest strings reach the GUI.
+
+Out of scope: network/disk charts, per-qube UI, a separate tray frontend, and themes.
