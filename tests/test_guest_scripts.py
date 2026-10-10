@@ -18,7 +18,7 @@ class GuestScripts(unittest.TestCase):
             script = script.replace("'/proc/meminfo'", repr(str(path)))
             script = script.replace('while True:', 'for _ in range(1):').replace('time.sleep(1)', '')
             line = subprocess.check_output([sys.executable, '-c', script], timeout=5)
-            self.assertEqual(line.split(), [b'M1', b'23', b'1000', b'400'])
+            self.assertEqual(line.split(), [b'M2', b'23', b'1000', b'400', b'500', b'0'])
 
     def test_network_selects_only_physical_interfaces(self):
         with tempfile.TemporaryDirectory() as tmp:

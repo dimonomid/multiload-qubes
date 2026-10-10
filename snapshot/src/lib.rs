@@ -1,14 +1,46 @@
 //! Shared collector/panel file contract, independent of Xen and GTK/Cairo.
-//! Memory is KiB, CPU is whole-machine percent, network is bytes/second.
+//! Memory and swap are KiB, CPU is whole-machine percent, network is bytes/second.
 use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_WIRE_BYTES: usize = 1024;
+pub const MAX_WIRE_BYTES: usize = 32 * 1024;
+pub const MAX_SWAP_ENTRIES: usize = 129; // 128 guest readers plus dom0.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwapEntry {
+    /// Domain incarnation key: a restarted qube starts a new line segment.
+    pub id: String,
+    /// Validated dom0-sourced qube name (never a guest-provided label).
+    pub name: String,
+    pub total: u64,
+    pub used: u64,
+}
+impl SwapEntry {
+    pub fn percent(&self) -> Option<f64> {
+        (self.total > 0).then(|| self.used as f64 / self.total as f64 * 100.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwapSnapshot {
+    /// Number of running, eligible guests plus dom0, including missing reports.
+    pub expected: u32,
+    pub entries: Vec<SwapEntry>,
+}
+impl SwapSnapshot {
+    /// None means no reporting domain has enabled swap; never invent a zero.
+    pub fn peak(&self) -> Option<f64> {
+        self.entries
+            .iter()
+            .filter_map(SwapEntry::percent)
+            .reduce(f64::max)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
-    /// Unix timestamp in seconds; MQ2 writes six fractional digits.
+    /// Unix timestamp in seconds; the wire format uses six fractional digits.
     pub timestamp: f64,
     /// Whole-machine CPU percentage, or unavailable/warming up.
     pub cpu: Option<f64>,
@@ -26,6 +58,8 @@ pub struct Snapshot {
     pub period: f64,
     /// Incoming and outgoing bytes/second, or unavailable/warming up.
     pub network: Option<(f64, f64)>,
+    /// Per-domain swap, absent in legacy snapshots. All quantities are KiB.
+    pub swap: Option<SwapSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,7 +73,7 @@ impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => write!(f, "snapshot exceeds {MAX_WIRE_BYTES} bytes"),
-            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2 snapshot format"),
+            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3 snapshot format"),
             Self::InvalidField(field) => write!(f, "invalid snapshot field: {field}"),
             Self::Stale => write!(f, "snapshot is stale or too far in the future"),
         }
@@ -82,6 +116,36 @@ impl Snapshot {
                 return Err(SnapshotError::InvalidField("network bytes/second"));
             }
         }
+        if let Some(swap) = &self.swap {
+            let mut ids = std::collections::BTreeSet::new();
+            let mut names = std::collections::BTreeSet::new();
+            if swap.entries.len() > MAX_SWAP_ENTRIES || swap.entries.len() > swap.expected as usize
+            {
+                return Err(SnapshotError::InvalidField("swap coverage"));
+            }
+            for entry in &swap.entries {
+                if entry.id.is_empty()
+                    || entry.id.len() > 96
+                    || !entry
+                        .id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b))
+                    || entry.name.is_empty()
+                    || entry.name.len() > 31
+                    || !entry.name.as_bytes()[0].is_ascii_alphabetic()
+                    || !entry
+                        .name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    || entry.used > entry.total
+                    || entry.total > i64::MAX as u64
+                    || !ids.insert(&entry.id)
+                    || !names.insert(&entry.name)
+                {
+                    return Err(SnapshotError::InvalidField("swap entry"));
+                }
+            }
+        }
         // Ordered checks make every subtraction safe even for hostile u64 values.
         if self.total == 0
             || self.allocated > self.total
@@ -94,7 +158,7 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Encode MQ2 with the existing field order, precision and unknown markers.
+    /// Encode MQ3 when swap is present; otherwise preserve the MQ2 layout.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
@@ -104,7 +168,7 @@ impl Snapshot {
             || "unknown unknown".into(),
             |(rx, tx)| format!("{rx:.3} {tx:.3}"),
         );
-        let line = format!(
+        let mut line = format!(
             "MQ2 {:.6} {cpu} {} {} {} {} {} {} {network}\n",
             self.timestamp,
             self.total,
@@ -114,19 +178,36 @@ impl Snapshot {
             self.overhead,
             self.period
         );
+        if let Some(swap) = &self.swap {
+            line.replace_range(..3, "MQ3");
+            line.pop(); // Replace the final newline with MQ3's swap extension.
+            let entries = if swap.entries.is_empty() {
+                "-".to_owned()
+            } else {
+                swap.entries
+                    .iter()
+                    .map(|e| format!("{}:{}:{}:{}", e.id, e.name, e.total, e.used))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            line.push_str(&format!(" {} {entries}\n", swap.expected));
+        }
         if line.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
         }
         Ok(line)
     }
 
-    /// Decode both versions. Historical data is permitted; readers check freshness.
+    /// Decode all supported versions. Historical data is permitted; readers check freshness.
     pub fn decode(text: &str) -> Result<Self, SnapshotError> {
         if text.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
         }
         let p: Vec<_> = text.split_whitespace().collect();
-        if !((p.len() == 9 && p[0] == "MQ1") || (p.len() == 11 && p[0] == "MQ2")) {
+        if !((p.len() == 9 && p[0] == "MQ1")
+            || (p.len() == 11 && p[0] == "MQ2")
+            || (p.len() == 13 && p[0] == "MQ3"))
+        {
             return Err(SnapshotError::InvalidFormat);
         }
         let network = if p[0] == "MQ1" || (p[9] == "unknown" && p[10] == "unknown") {
@@ -136,6 +217,32 @@ impl Snapshot {
                 field(p[9], "incoming bytes/second")?,
                 field(p[10], "outgoing bytes/second")?,
             ))
+        };
+        let swap = if p[0] == "MQ3" {
+            let mut entries = Vec::new();
+            if p[12] != "-" {
+                for item in p[12].split(',') {
+                    if entries.len() >= MAX_SWAP_ENTRIES {
+                        return Err(SnapshotError::InvalidField("swap coverage"));
+                    }
+                    let fields: Vec<_> = item.split(':').collect();
+                    if fields.len() != 4 {
+                        return Err(SnapshotError::InvalidField("swap entry"));
+                    }
+                    entries.push(SwapEntry {
+                        id: fields[0].into(),
+                        name: fields[1].into(),
+                        total: field(fields[2], "swap total KiB")?,
+                        used: field(fields[3], "swap used KiB")?,
+                    });
+                }
+            }
+            Some(SwapSnapshot {
+                expected: field(p[11], "swap expected reporters")?,
+                entries,
+            })
+        } else {
+            None
         };
         let snapshot = Self {
             timestamp: field(p[1], "timestamp")?,
@@ -151,6 +258,7 @@ impl Snapshot {
             overhead: field(p[7], "overhead KiB")?,
             period: field(p[8], "period seconds")?,
             network,
+            swap,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -205,6 +313,82 @@ mod tests {
             Snapshot::decode(&snapshot.encode().unwrap()).unwrap(),
             snapshot
         );
+    }
+
+    #[test]
+    fn mq3_round_trip_peak_disabled_swap_and_missing_reports() {
+        let mut snapshot = Snapshot::decode(MQ2).unwrap();
+        let wire = format!(
+            "{} 4 dom0:dom0:0:0,1/vm-a:work:100:60,2/vm-b:dev:200:120\n",
+            MQ2.trim().replacen("MQ2", "MQ3", 1)
+        );
+        snapshot.swap = Some(SwapSnapshot {
+            expected: 4,
+            entries: vec![
+                SwapEntry {
+                    id: "dom0".into(),
+                    name: "dom0".into(),
+                    total: 0,
+                    used: 0,
+                },
+                SwapEntry {
+                    id: "1/vm-a".into(),
+                    name: "work".into(),
+                    total: 100,
+                    used: 60,
+                },
+                SwapEntry {
+                    id: "2/vm-b".into(),
+                    name: "dev".into(),
+                    total: 200,
+                    used: 120,
+                },
+            ],
+        });
+        assert_eq!(snapshot.swap.as_ref().unwrap().peak(), Some(60.0));
+        assert_eq!(snapshot.encode().unwrap(), wire);
+        assert_eq!(Snapshot::decode(&wire).unwrap(), snapshot);
+        assert!(Snapshot::decode_fresh_at(&wire, 1005.5).is_ok());
+        assert_eq!(
+            Snapshot::decode_fresh_at(&wire, 1006.0),
+            Err(SnapshotError::Stale)
+        );
+        snapshot.swap.as_mut().unwrap().entries.clear();
+        assert_eq!(snapshot.swap.as_ref().unwrap().peak(), None);
+        assert_eq!(
+            Snapshot::decode(&snapshot.encode().unwrap()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn mq3_rejects_untrusted_labels_duplicates_and_invalid_totals() {
+        let base = MQ2.trim().replacen("MQ2", "MQ3", 1);
+        for fields in [
+            "0 dom0:dom0:1:0",
+            "1 dom0:dom0:0:1",
+            "1 dom0:dom0:10:11",
+            "1 dom0:bad;name:10:1",
+            "1 dom0:bad\u{202e}:10:1",
+            "1 bad.id:work:10:1",
+            "1 dom0:dom0:-1:0",
+            "1 dom0:dom0:10:NaN",
+            "2 dom0:dom0:10:1,dom0:dev:10:1",
+            "2 a:work:10:1,b:work:10:1",
+            "1 dom0:dom0:10",
+            "1 dom0:dom0:10:0:extra",
+        ] {
+            assert!(
+                Snapshot::decode(&format!("{base} {fields}")).is_err(),
+                "{fields}"
+            );
+        }
+        let entries = (0..=MAX_SWAP_ENTRIES)
+            .map(|i| format!("id{i}:qube{i}:10:1"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(Snapshot::decode(&format!("{base} 130 {entries}")).is_err());
+        assert!(Snapshot::decode(&format!("{base} 1 {}:work:10:1", "a".repeat(97))).is_err());
     }
 
     #[test]

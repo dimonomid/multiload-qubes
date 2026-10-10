@@ -4,7 +4,7 @@ mod shutdown;
 pub mod stream;
 pub mod xen;
 
-use multiload_qubes_snapshot::{unix_time_now, Snapshot};
+use multiload_qubes_snapshot::{unix_time_now, Snapshot, SwapEntry, SwapSnapshot};
 use protocol::{Kind, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -158,13 +158,48 @@ impl MemoryPool {
                     return None;
                 }
                 match reader.value() {
-                    Some(Reading::Memory(used)) => Some((d.id, used)),
+                    Some(Reading::Memory(used) | Reading::MemorySwap { used, .. }) => {
+                        Some((d.id, used))
+                    }
                     _ => None,
                 }
             })
             .collect()
     }
 }
+/// Missing reports stay absent, and therefore cannot be mistaken for empty swap.
+fn swap_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> SwapSnapshot {
+    let active = eligible(host);
+    let mut entries = vec![SwapEntry {
+        id: "dom0".into(),
+        name: "dom0".into(),
+        total: dom0.0,
+        used: dom0.1,
+    }];
+    if let Some(pool) = pool {
+        for (id, key) in &active {
+            let Some((identity, reader)) = pool.readers.get(id) else {
+                continue;
+            };
+            if identity != key {
+                continue;
+            }
+            if let Some(Reading::MemorySwap { total, swapped, .. }) = reader.value() {
+                entries.push(SwapEntry {
+                    id: format!("{}/{}", id, key.uuid),
+                    name: key.name.clone(),
+                    total,
+                    used: swapped,
+                });
+            }
+        }
+    }
+    SwapSnapshot {
+        expected: active.len() as u32 + 1,
+        entries,
+    }
+}
+
 impl Drop for MemoryPool {
     fn drop(&mut self) {
         // Stop every worker first, then their Drop implementations join concurrently exiting threads.
@@ -217,6 +252,7 @@ pub fn snapshot(
             .saturating_sub(allocated)
             .saturating_sub(host.free),
         period,
+        swap: None,
         network: match network {
             Some(Reading::Network(rx, tx)) => Some((rx, tx)),
             _ => None,
@@ -266,14 +302,11 @@ pub fn run(options: Options) -> Result<(), String> {
     let start = Instant::now();
     if options.once {
         let host = xen.sample()?;
-        let usage =
-            protocol::dom0_used(&fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?)?;
-        print!(
-            "{}",
-            snapshot(&host, usage, &BTreeMap::new(), None, None, options.interval)?
-                .encode()
-                .map_err(|e| e.to_string())?
-        );
+        let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+        let usage = protocol::dom0_used(&meminfo)?;
+        let mut data = snapshot(&host, usage, &BTreeMap::new(), None, None, options.interval)?;
+        data.swap = Some(swap_snapshot(&host, protocol::dom0_swap(&meminfo)?, None));
+        print!("{}", data.encode().map_err(|e| e.to_string())?);
         return Ok(());
     }
     let parent = options
@@ -307,10 +340,9 @@ pub fn run(options: Options) -> Result<(), String> {
             } else {
                 BTreeMap::new()
             };
-            let dom0 = protocol::dom0_used(
-                &fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?,
-            )?;
-            let data = snapshot(
+            let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+            let dom0 = protocol::dom0_used(&meminfo)?;
+            let mut data = snapshot(
                 &host,
                 dom0,
                 &readings,
@@ -318,6 +350,11 @@ pub fn run(options: Options) -> Result<(), String> {
                 network.as_ref().and_then(Reader::value),
                 options.interval,
             )?;
+            data.swap = Some(swap_snapshot(
+                &host,
+                protocol::dom0_swap(&meminfo)?,
+                memory.as_ref(),
+            ));
             publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
         })();
         if let Err(error) = result {
@@ -427,6 +464,48 @@ mod tests {
         );
         fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn swap_coverage_ignores_missing_paused_and_reincarnated_readers() {
+        let mut host = host();
+        let mut pool = MemoryPool::new();
+        pool.factory = |d| {
+            Reader::spawn(
+                CommandSpec {
+                    source: "test swap".into(),
+                    program: "python3".into(),
+                    args: vec![
+                        "-u".into(),
+                        "-c".into(),
+                        format!(
+                "import time; print('M2 {} 1000 400 500 125',flush=True); time.sleep(30)", d.id),
+                    ],
+                },
+                Kind::Memory(d.id),
+                Timing::default(),
+            )
+        };
+        pool.sync(&host);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pool.readings(&host).len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let data = swap_snapshot(&host, (100, 50), Some(&pool));
+        assert_eq!(data.expected, 3);
+        assert_eq!(data.entries.len(), 3);
+        assert_eq!(data.entries[0].name, "dom0");
+        assert_eq!(data.entries[1].used, 375);
+        assert_eq!(data.peak(), Some(75.0));
+        assert_eq!(pool.readings(&host)[&1], 600); // Swap is never added to RAM.
+        host.domains[1].identity = "new-identity".into();
+        assert_eq!(swap_snapshot(&host, (0, 0), Some(&pool)).entries.len(), 2);
+        host.domains[2].paused = true;
+        let data = swap_snapshot(&host, (0, 0), Some(&pool));
+        assert_eq!(data.expected, 2);
+        assert_eq!(data.entries.len(), 1);
+        assert_eq!(data.peak(), None);
+        assert_eq!(swap_snapshot(&host, (0, 0), None).entries.len(), 1);
+    }
+
     #[test]
     fn pool_reuses_retires_and_bounds_connections() {
         let mut pool = MemoryPool::new();

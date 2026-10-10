@@ -1,4 +1,6 @@
 //! Metrics and Cairo renderer. GTK/XFCE ownership stays in the small C adapter.
+mod swap;
+
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
 use std::fs;
@@ -32,6 +34,7 @@ impl Graphs {
                 unknown: 4 * 1048576,
                 overhead: 256 * 1024,
                 period: 1.0,
+                swap: Some(swap::demo(t)),
                 network: Some((
                     (1.0 + t.sin()) * 800000.0,
                     (1.0 + (t * 1.7).cos()) * 200000.0,
@@ -54,10 +57,11 @@ impl Graphs {
                 ),
                 None => "\nNetwork: unavailable or warming up".into(),
             };
-            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM used = MemTotal − MemAvailable; swap excluded.{}",
+            let swap = swap::tooltip(s.swap.as_ref());
+            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM used = MemTotal − MemAvailable; swap excluded.{}{}",
                 if demo { "DEMO — simulated data\n" } else { "" }, cpu, gib(s.used),
                 gib(s.unknown), gib(s.allocated - s.unknown - s.used),
-                gib(s.allocated), gib(s.total), gib(s.overhead), network)
+                gib(s.allocated), gib(s.total), gib(s.overhead), network, swap)
         } else {
             "Metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0.\nNo allocated memory is substituted for actual usage.".into()
         };
@@ -80,6 +84,11 @@ fn rate_text(bytes: f64) -> String {
 // Only these Cairo functions cross the FFI; the caller owns the draw context.
 #[link(name = "cairo")]
 extern "C" {
+    fn cairo_set_source_rgba(cr: *mut c_void, r: f64, g: f64, b: f64, a: f64);
+    fn cairo_set_line_width(cr: *mut c_void, width: f64);
+    fn cairo_move_to(cr: *mut c_void, x: f64, y: f64);
+    fn cairo_line_to(cr: *mut c_void, x: f64, y: f64);
+    fn cairo_stroke(cr: *mut c_void);
     fn cairo_set_source_rgb(cr: *mut c_void, r: f64, g: f64, b: f64);
     fn cairo_rectangle(cr: *mut c_void, x: f64, y: f64, w: f64, h: f64);
     fn cairo_fill(cr: *mut c_void);
@@ -117,6 +126,7 @@ impl Graphs {
         let (border, top) = match kind {
             1 => (0x008042, 0x13261D),
             2 => (0x807100, 0x262413),
+            3 => (0x510080, 0x1F1326),
             _ => (0x005D80, 0x132126),
         };
         rect(cr, border, 0.0, 0.0, w, h);
@@ -126,6 +136,10 @@ impl Graphs {
                 | (((((top >> 8) & 255) as f64 * scale) as u32) << 8)
                 | (((top & 255) as f64 * scale) as u32);
             rect(cr, c, 1.0, y as f64, w - 2.0, 1.0);
+        }
+        if kind == 3 {
+            self.swap_chart(cr, width, height);
+            return;
         }
         let n = self.history.len().min((width - 2) as usize);
         let net_scale = self.network_scale(n);
@@ -209,6 +223,7 @@ pub unsafe extern "C" fn mq_draw(
     cpu: i32,
     ram: i32,
     network: i32,
+    swap: i32,
     vertical: i32,
 ) {
     let Some(g) = g.as_ref() else {
@@ -217,7 +232,7 @@ pub unsafe extern "C" fn mq_draw(
     if cr.is_null() || width < 4 || height < 4 {
         return;
     }
-    let count = (cpu != 0) as i32 + (ram != 0) as i32 + (network != 0) as i32;
+    let count = (cpu != 0) as i32 + (ram != 0) as i32 + (network != 0) as i32 + (swap != 0) as i32;
     if count == 0 {
         return;
     }
@@ -233,7 +248,7 @@ pub unsafe extern "C" fn mq_draw(
     cairo_rectangle(cr, 0.0, 0.0, width as f64, height as f64);
     cairo_clip(cr);
     let mut index = 0;
-    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2)] {
+    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2), (swap, 3)] {
         if enabled == 0 {
             continue;
         }

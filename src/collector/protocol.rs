@@ -52,9 +52,34 @@ pub fn dom0_used(text: &str) -> Result<u64, String> {
     )
 }
 
+/// Swap capacity and occupied slots, in KiB; disabled swap is (0, 0).
+pub fn swap_usage(total: &str, free: &str) -> Result<(u64, u64), String> {
+    let (total, free) = (number(total)?, number(free)?);
+    if free > total {
+        return Err("invalid swap totals".into());
+    }
+    Ok((total, total - free))
+}
+
+pub fn dom0_swap(text: &str) -> Result<(u64, u64), String> {
+    let mut fields = BTreeMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            if let Some(value) = value.split_whitespace().next() {
+                fields.insert(key, value);
+            }
+        }
+    }
+    swap_usage(
+        fields.get("SwapTotal").ok_or("missing SwapTotal")?,
+        fields.get("SwapFree").ok_or("missing SwapFree")?,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reading {
-    Memory(u64),
+    Memory(u64), // Legacy M1 reporters have no swap measurement.
+    MemorySwap { used: u64, total: u64, swapped: u64 },
     Network(f64, f64),
 }
 
@@ -83,14 +108,28 @@ impl Tracker {
         }
         let text = std::str::from_utf8(line).map_err(|_| "invalid encoding")?;
         let fields: Vec<_> = text.split_whitespace().collect();
-        if fields.len() != 4 {
-            return Err("invalid guest frame fields".into());
-        }
         if let Kind::Memory(domid) = self.kind {
-            if line.len() > 256 || fields[0] != "M1" || number(fields[1])? != domid as u64 {
+            if line.len() > 256
+                || !((fields.len() == 4 && fields[0] == "M1")
+                    || (fields.len() == 6 && fields[0] == "M2"))
+                || number(fields[1])? != domid as u64
+            {
                 return Err("invalid memory frame or changed domain".into());
             }
-            return Ok(Some(Reading::Memory(memory_used(fields[2], fields[3])?)));
+            let used = memory_used(fields[2], fields[3])?;
+            return Ok(Some(if fields[0] == "M2" {
+                let (total, swapped) = swap_usage(fields[4], fields[5])?;
+                Reading::MemorySwap {
+                    used,
+                    total,
+                    swapped,
+                }
+            } else {
+                Reading::Memory(used)
+            }));
+        }
+        if fields.len() != 4 {
+            return Err("invalid guest frame fields".into());
         }
         if fields[0] != "N1"
             || fields[2].len() != 36
@@ -177,6 +216,45 @@ mod tests {
             Ok(Some(Reading::Memory(0)))
         );
     }
+    #[test]
+    fn memory_swap_frames_validate_capacity_and_keep_ram_separate() {
+        for (frame, total, swapped) in [
+            ("M2 23 1000 400 500 125", 500, 375),
+            ("M2 23 1000 400 0 0", 0, 0),
+        ] {
+            assert_eq!(
+                Tracker::new(Kind::Memory(23)).update(frame.as_bytes()),
+                Ok(Some(Reading::MemorySwap {
+                    used: 600,
+                    total,
+                    swapped
+                }))
+            );
+        }
+        assert_eq!(
+            dom0_swap("SwapTotal: 500 kB\nSwapFree: 125 kB"),
+            Ok((500, 375))
+        );
+        assert!(dom0_swap("SwapTotal: 500 kB").is_err());
+        for frame in [
+            "M2 23 1000 400 0 1",
+            "M2 23 1000 400 500 501",
+            "M2 23 1000 400 -1 0",
+            "M2 23 1000 400 NaN 0",
+            "M2 24 1000 400 500 0",
+            "M2 23 1000 400 500",
+            "M2 23 1000 400 500 0 extra",
+            "M1 23 1000 400 500 0",
+        ] {
+            assert!(
+                Tracker::new(Kind::Memory(23))
+                    .update(frame.as_bytes())
+                    .is_err(),
+                "{frame}"
+            );
+        }
+    }
+
     #[test]
     fn rejects_hostile_memory() {
         for frame in [
