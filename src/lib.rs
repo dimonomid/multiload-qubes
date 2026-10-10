@@ -9,7 +9,7 @@ pub use multiload_qubes_snapshot::Snapshot;
 
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
-    tooltips: [CString; 4],
+    tooltips: [CString; 5],
     tick: u64,
 }
 
@@ -35,6 +35,13 @@ impl Graphs {
                 overhead: 256 * 1024,
                 period: 1.0,
                 swap: Some(swap::demo(t)),
+                disk: Some(multiload_qubes_snapshot::DiskSnapshot {
+                    devices: vec!["nvme0n1".into()],
+                    rates: Some((
+                        (1.0 + (t * 0.7).sin()) * 8_000_000.0,
+                        (1.0 + (t * 1.3).cos()) * 3_000_000.0,
+                    )),
+                }),
                 network: Some((
                     (1.0 + t.sin()) * 800000.0,
                     (1.0 + (t * 1.7).cos()) * 200000.0,
@@ -54,7 +61,7 @@ impl Graphs {
     }
 }
 
-fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 4] {
+fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 5] {
     let text = if let Some(s) = sample {
         let cpu = s
             .cpu
@@ -71,14 +78,37 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 4] {
             ),
             None => "Network: unavailable or warming up".into(),
         };
+        let disk = match &s.disk {
+            Some(disk) if disk.devices.is_empty() => {
+                "Disk: no supported physical disks visible in dom0.".into()
+            }
+            Some(disk) => {
+                let rates = disk.rates.map_or_else(
+                    || "Disk: unavailable or warming up".into(),
+                    |(read, write)| {
+                        format!(
+                            "Disk read: {}\nDisk write: {}",
+                            rate_text(read),
+                            rate_text(write)
+                        )
+                    },
+                );
+                format!(
+                    "{rates}\nDevices: {}\nPhysical device traffic in dom0.",
+                    disk.devices.join(", ")
+                )
+            }
+            None => "Disk: unavailable (collection failure or legacy collector)".into(),
+        };
         [
             format!("CPU: {cpu}\n100% = all host logical CPUs busy."),
             ram,
             network,
             swap::tooltip(s.swap.as_ref()),
+            disk,
         ]
     } else {
-        ["CPU", "RAM", "Network", "Swap"].map(|name| format!(
+        ["CPU", "RAM", "Network", "Swap", "Disk"].map(|name| format!(
             "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0."
         ))
     };
@@ -132,13 +162,20 @@ unsafe fn rect(cr: *mut c_void, color: u32, x: f64, y: f64, w: f64, h: f64) {
 }
 
 impl Graphs {
-    fn network_scale(&self, columns: usize) -> f64 {
+    fn io_scale(&self, columns: usize, kind: i32) -> f64 {
         let peak = self
             .history
             .iter()
             .rev()
             .take(columns)
-            .filter_map(|s| s.as_ref()?.network)
+            .filter_map(|s| {
+                let s = s.as_ref()?;
+                if kind == 4 {
+                    s.disk.as_ref()?.rates
+                } else {
+                    s.network
+                }
+            })
             .map(|(rx, tx)| rx + tx)
             .fold(1024.0, f64::max);
         2f64.powf(peak.log2().ceil())
@@ -149,6 +186,7 @@ impl Graphs {
             1 => (0x008042, 0x13261D),
             2 => (0x807100, 0x262413),
             3 => (0x510080, 0x1F1326),
+            4 => (0x804200, 0x261D13),
             _ => (0x005D80, 0x132126),
         };
         rect(cr, border, 0.0, 0.0, w, h);
@@ -164,7 +202,7 @@ impl Graphs {
             return;
         }
         let n = self.history.len().min((width - 2) as usize);
-        let net_scale = self.network_scale(n);
+        let io_scale = self.io_scale(n, kind);
         for (i, sample) in self.history.iter().skip(self.history.len() - n).enumerate() {
             let x = w - 1.0 - n as f64 + i as f64;
             if let Some(s) = sample {
@@ -178,14 +216,19 @@ impl Graphs {
                         rect(cr, 0xD14343, x, h - 1.0 - allocated, 1.0, unknown);
                     }
                     rect(cr, 0x03964F, x, h - 1.0 - used, 1.0, used);
-                } else if kind == 2 {
-                    if let Some((rx, tx)) = s.network {
-                        let incoming = rx / net_scale * (h - 2.0);
-                        let outgoing = tx / net_scale * (h - 2.0);
-                        rect(cr, 0xE2CC05, x, h - 1.0 - incoming, 1.0, incoming);
+                } else if kind == 2 || kind == 4 {
+                    let (rates, read_color, write_color) = if kind == 4 {
+                        (s.disk.as_ref().and_then(|d| d.rates), 0xED7A00, 0xFFAB73)
+                    } else {
+                        (s.network, 0xE2CC05, 0x696018)
+                    };
+                    if let Some((rx, tx)) = rates {
+                        let incoming = rx / io_scale * (h - 2.0);
+                        let outgoing = tx / io_scale * (h - 2.0);
+                        rect(cr, read_color, x, h - 1.0 - incoming, 1.0, incoming);
                         rect(
                             cr,
-                            0x696018,
+                            write_color,
                             x,
                             h - 1.0 - incoming - outgoing,
                             1.0,
@@ -248,6 +291,7 @@ pub unsafe extern "C" fn mq_draw(
     ram: i32,
     network: i32,
     swap: i32,
+    disk: i32,
     vertical: i32,
 ) {
     let Some(g) = g.as_ref() else {
@@ -256,7 +300,11 @@ pub unsafe extern "C" fn mq_draw(
     if cr.is_null() || width < 4 || height < 4 {
         return;
     }
-    let count = (cpu != 0) as i32 + (ram != 0) as i32 + (network != 0) as i32 + (swap != 0) as i32;
+    let count = (cpu != 0) as i32
+        + (ram != 0) as i32
+        + (network != 0) as i32
+        + (swap != 0) as i32
+        + (disk != 0) as i32;
     if count == 0 {
         return;
     }
@@ -272,7 +320,7 @@ pub unsafe extern "C" fn mq_draw(
     cairo_rectangle(cr, 0.0, 0.0, width as f64, height as f64);
     cairo_clip(cr);
     let mut index = 0;
-    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2), (swap, 3)] {
+    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2), (swap, 3), (disk, 4)] {
         if enabled == 0 {
             continue;
         }
@@ -300,16 +348,55 @@ mod tests {
         graphs.history.clear();
         sample.network = Some((4096.0, 4096.0));
         graphs.history.push_back(Some(sample.clone()));
-        assert_eq!(graphs.network_scale(2), 8192.0);
+        assert_eq!(graphs.io_scale(2, 2), 8192.0);
         sample.network = Some((0.0, 0.0));
         graphs.history.push_back(Some(sample));
-        assert_eq!(graphs.network_scale(1), 1024.0);
+        assert_eq!(graphs.io_scale(1, 2), 1024.0);
     }
+    #[test]
+    fn disk_scale_covers_combined_rates_and_expires_old_peaks() {
+        let mut g = Graphs::new();
+        g.update(true);
+        let mut sample = g.history.back().unwrap().clone().unwrap();
+        g.history.clear();
+        sample.disk.as_mut().unwrap().rates = Some((4096.0, 4096.0));
+        g.history.push_back(Some(sample.clone()));
+        assert_eq!(g.io_scale(2, 4), 8192.0);
+        sample.disk.as_mut().unwrap().rates = Some((0.0, 0.0));
+        g.history.push_back(Some(sample.clone()));
+        assert_eq!(g.io_scale(1, 4), 1024.0);
+        sample.disk.as_mut().unwrap().rates = None;
+        assert!(tooltips(Some(&sample), false)[4]
+            .to_str()
+            .unwrap()
+            .contains("warming up"));
+        assert!(tooltips(Some(&sample), false)[4]
+            .to_str()
+            .unwrap()
+            .contains("nvme0n1"));
+        sample.disk.as_mut().unwrap().devices.clear();
+        assert!(tooltips(Some(&sample), false)[4]
+            .to_str()
+            .unwrap()
+            .contains("no supported physical disks"));
+        sample.disk = None;
+        assert!(tooltips(Some(&sample), false)[4]
+            .to_str()
+            .unwrap()
+            .starts_with("Disk: unavailable"));
+    }
+
     #[test]
     fn tooltips_only_include_the_selected_chart_and_handle_missing_metrics() {
         let mut graphs = Graphs::new();
         graphs.update(true);
-        let expected = ["CPU:", "Known used RAM:", "Network in:", "Swap:"];
+        let expected = [
+            "CPU:",
+            "Known used RAM:",
+            "Network in:",
+            "Swap:",
+            "Disk read:",
+        ];
         for (kind, label) in expected.iter().enumerate() {
             let text = graphs.tooltips[kind].to_str().unwrap();
             assert!(text.contains(label));
@@ -326,7 +413,10 @@ mod tests {
             );
         }
         let missing = tooltips(None, false);
-        for (text, label) in missing.iter().zip(["CPU:", "RAM:", "Network:", "Swap:"]) {
+        for (text, label) in missing
+            .iter()
+            .zip(["CPU:", "RAM:", "Network:", "Swap:", "Disk:"])
+        {
             assert!(text.to_str().unwrap().starts_with(label));
             assert!(text.to_str().unwrap().contains("unavailable or stale"));
         }
@@ -342,7 +432,7 @@ mod tests {
             .unwrap()
             .starts_with("Swap: unavailable"));
         assert!(unsafe { mq_tooltip(&graphs, -1) }.is_null());
-        assert!(unsafe { mq_tooltip(&graphs, 4) }.is_null());
+        assert!(unsafe { mq_tooltip(&graphs, 5) }.is_null());
     }
 
     #[test]

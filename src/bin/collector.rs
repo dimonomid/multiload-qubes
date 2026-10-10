@@ -4,7 +4,7 @@ mod collector;
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Collect whole-machine Qubes CPU, RAM and network metrics.
+/// Collect Qubes CPU, RAM, network, swap and physical-disk activity.
 #[derive(Parser, Debug)]
 #[command(name = "multiload-qubes-collector", version)]
 struct Cli {
@@ -28,7 +28,7 @@ struct Cli {
     #[arg(long)]
     no_network: bool,
 
-    /// Disable guest RAM collection; their allocation remains unknown.
+    /// Disable guest RAM/swap collection; their RAM allocation remains unknown.
     #[arg(long)]
     no_guest_memory: bool,
 }

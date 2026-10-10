@@ -1,7 +1,7 @@
 Name:           multiload-qubes
-Version:        0.5.1
+Version:        0.6.0
 Release:        1%{?dist}
-Summary:        Whole-machine CPU, RAM, network and swap graphs for the Qubes XFCE panel
+Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
@@ -20,7 +20,7 @@ Requires:       /usr/bin/qvm-run
 %{?systemd_requires}
 
 %description
-Native XFCE panel plugin displaying scrolling CPU, memory, network and swap graphs for Qubes.
+Native XFCE panel plugin displaying scrolling CPU, memory, network, swap and disk I/O graphs for Qubes.
 A read-only dom0 collector publishes Xen allocation and guest-reported usage.
 
 %prep
@@ -56,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.0-1
+- Add physical-disk read/write activity with multiload-ng colors and per-chart tooltips
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.5.1-1
 - Show chart-specific tooltips for horizontal and vertical panel layouts
 

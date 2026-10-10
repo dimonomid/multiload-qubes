@@ -38,6 +38,25 @@ impl SwapSnapshot {
     }
 }
 
+pub const MAX_DISK_DEVICES: usize = 64;
+
+/// Names come from the kernel, and must remain safe in plain-text tooltips/wire records.
+pub fn disk_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-!.".contains(&b))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskSnapshot {
+    pub devices: Vec<String>,
+    /// Read/write bytes per second. None means warming up or no selected devices.
+    pub rates: Option<(f64, f64)>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     /// Unix timestamp in seconds; the wire format uses six fractional digits.
@@ -60,6 +79,8 @@ pub struct Snapshot {
     pub network: Option<(f64, f64)>,
     /// Per-domain swap, absent in legacy snapshots. All quantities are KiB.
     pub swap: Option<SwapSnapshot>,
+    /// Physical block-device activity in dom0, absent when unavailable or legacy.
+    pub disk: Option<DiskSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +94,7 @@ impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => write!(f, "snapshot exceeds {MAX_WIRE_BYTES} bytes"),
-            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3 snapshot format"),
+            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4 snapshot format"),
             Self::InvalidField(field) => write!(f, "invalid snapshot field: {field}"),
             Self::Stale => write!(f, "snapshot is stale or too far in the future"),
         }
@@ -90,6 +111,23 @@ pub fn unix_time_now() -> Result<f64, SnapshotError> {
 
 fn field<T: FromStr>(value: &str, name: &'static str) -> Result<T, SnapshotError> {
     value.parse().map_err(|_| SnapshotError::InvalidField(name))
+}
+
+fn encode_rates(rates: Option<(f64, f64)>) -> String {
+    rates.map_or_else(
+        || "unknown unknown".into(),
+        |(a, b)| format!("{a:.3} {b:.3}"),
+    )
+}
+fn decode_rates(a: &str, b: &str) -> Result<Option<(f64, f64)>, SnapshotError> {
+    if a == "unknown" && b == "unknown" {
+        Ok(None)
+    } else {
+        Ok(Some((
+            field(a, "rate bytes/second")?,
+            field(b, "rate bytes/second")?,
+        )))
+    }
 }
 
 impl Snapshot {
@@ -114,6 +152,22 @@ impl Snapshot {
                 || !(0.0..=1e15).contains(&tx)
             {
                 return Err(SnapshotError::InvalidField("network bytes/second"));
+            }
+        }
+        if let Some(disk) = &self.disk {
+            let names: std::collections::BTreeSet<_> = disk.devices.iter().collect();
+            if disk.devices.len() > MAX_DISK_DEVICES
+                || names.len() != disk.devices.len()
+                || disk.devices.iter().any(|name| !disk_name(name))
+                || disk.rates.is_some_and(|(read, write)| {
+                    disk.devices.is_empty()
+                        || !read.is_finite()
+                        || !write.is_finite()
+                        || !(0.0..=1e15).contains(&read)
+                        || !(0.0..=1e15).contains(&write)
+                })
+            {
+                return Err(SnapshotError::InvalidField("disk activity"));
             }
         }
         if let Some(swap) = &self.swap {
@@ -158,18 +212,22 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Encode MQ3 when swap is present; otherwise preserve the MQ2 layout.
+    /// Encode MQ4 with disk data, MQ3 with swap, or legacy MQ2 otherwise.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
             .cpu
             .map_or_else(|| "unknown".into(), |v| format!("{v:.4}"));
-        let network = self.network.map_or_else(
-            || "unknown unknown".into(),
-            |(rx, tx)| format!("{rx:.3} {tx:.3}"),
-        );
+        let network = encode_rates(self.network);
+        let version = if self.disk.is_some() {
+            "MQ4"
+        } else if self.swap.is_some() {
+            "MQ3"
+        } else {
+            "MQ2"
+        };
         let mut line = format!(
-            "MQ2 {:.6} {cpu} {} {} {} {} {} {} {network}\n",
+            "{version} {:.6} {cpu} {} {} {} {} {} {} {network}",
             self.timestamp,
             self.total,
             self.allocated,
@@ -179,8 +237,6 @@ impl Snapshot {
             self.period
         );
         if let Some(swap) = &self.swap {
-            line.replace_range(..3, "MQ3");
-            line.pop(); // Replace the final newline with MQ3's swap extension.
             let entries = if swap.entries.is_empty() {
                 "-".to_owned()
             } else {
@@ -190,8 +246,19 @@ impl Snapshot {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            line.push_str(&format!(" {} {entries}\n", swap.expected));
+            line.push_str(&format!(" {} {entries}", swap.expected));
+        } else if self.disk.is_some() {
+            line.push_str(" unknown -");
         }
+        if let Some(disk) = &self.disk {
+            let devices = if disk.devices.is_empty() {
+                "-".into()
+            } else {
+                disk.devices.join(",")
+            };
+            line.push_str(&format!(" {} {devices}", encode_rates(disk.rates)));
+        }
+        line.push('\n');
         if line.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
         }
@@ -206,19 +273,17 @@ impl Snapshot {
         let p: Vec<_> = text.split_whitespace().collect();
         if !((p.len() == 9 && p[0] == "MQ1")
             || (p.len() == 11 && p[0] == "MQ2")
-            || (p.len() == 13 && p[0] == "MQ3"))
+            || (p.len() == 13 && p[0] == "MQ3")
+            || (p.len() == 16 && p[0] == "MQ4"))
         {
             return Err(SnapshotError::InvalidFormat);
         }
-        let network = if p[0] == "MQ1" || (p[9] == "unknown" && p[10] == "unknown") {
+        let network = if p[0] == "MQ1" {
             None
         } else {
-            Some((
-                field(p[9], "incoming bytes/second")?,
-                field(p[10], "outgoing bytes/second")?,
-            ))
+            decode_rates(p[9], p[10])?
         };
-        let swap = if p[0] == "MQ3" {
+        let swap = if p[0] == "MQ3" || (p[0] == "MQ4" && p[11] != "unknown") {
             let mut entries = Vec::new();
             if p[12] != "-" {
                 for item in p[12].split(',') {
@@ -244,6 +309,21 @@ impl Snapshot {
         } else {
             None
         };
+        if p[0] == "MQ4" && p[11] == "unknown" && p[12] != "-" {
+            return Err(SnapshotError::InvalidField("unknown swap entries"));
+        }
+        let disk = if p[0] == "MQ4" {
+            Some(DiskSnapshot {
+                devices: if p[15] == "-" {
+                    Vec::new()
+                } else {
+                    p[15].split(',').map(str::to_owned).collect()
+                },
+                rates: decode_rates(p[13], p[14])?,
+            })
+        } else {
+            None
+        };
         let snapshot = Self {
             timestamp: field(p[1], "timestamp")?,
             cpu: if p[2] == "unknown" {
@@ -259,6 +339,7 @@ impl Snapshot {
             period: field(p[8], "period seconds")?,
             network,
             swap,
+            disk,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -389,6 +470,78 @@ mod tests {
             .join(",");
         assert!(Snapshot::decode(&format!("{base} 130 {entries}")).is_err());
         assert!(Snapshot::decode(&format!("{base} 1 {}:work:10:1", "a".repeat(97))).is_err());
+    }
+
+    #[test]
+    fn mq4_round_trips_disk_rates_devices_and_unknown_swap() {
+        let mut s = Snapshot::decode(MQ2).unwrap();
+        s.disk = Some(DiskSnapshot {
+            devices: vec!["nvme0n1".into(), "sda".into()],
+            rates: Some((1024.5, 2048.25)),
+        });
+        let wire = format!(
+            "{} unknown - 1024.500 2048.250 nvme0n1,sda\n",
+            MQ2.trim().replacen("MQ2", "MQ4", 1)
+        );
+        assert_eq!(s.encode().unwrap(), wire);
+        assert_eq!(Snapshot::decode(&wire).unwrap(), s);
+        assert!(Snapshot::decode_fresh_at(&wire, 1005.5).is_ok());
+        assert_eq!(
+            Snapshot::decode_fresh_at(&wire, 1006.0),
+            Err(SnapshotError::Stale)
+        );
+        s.swap = Some(SwapSnapshot {
+            expected: 1,
+            entries: Vec::new(),
+        });
+        for rates in [Some((0.0, 0.0)), None] {
+            s.disk.as_mut().unwrap().rates = rates;
+            assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
+        }
+        s.disk.as_mut().unwrap().devices.clear();
+        assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
+        assert!(Snapshot::decode(MQ2).unwrap().disk.is_none());
+    }
+
+    #[test]
+    fn mq4_rejects_bad_disk_names_duplicates_counts_and_rates() {
+        let base = format!("{} unknown -", MQ2.trim().replacen("MQ2", "MQ4", 1));
+        for extension in [
+            "NaN 1 sda",
+            "1 inf sda",
+            "-1 1 sda",
+            "1e16 0 sda",
+            "unknown 1 sda",
+            "1 unknown sda",
+            "0 0 -",
+            "0 0 sda,sda",
+            "0 0 /dev/sda",
+            "0 0 sda;cmd",
+            "0 0 sda\u{202e}",
+            "0 0 sda,",
+            "0 0 sda extra",
+        ] {
+            assert!(
+                Snapshot::decode(&format!("{base} {extension}")).is_err(),
+                "{extension}"
+            );
+        }
+        let many = (0..=MAX_DISK_DEVICES)
+            .map(|i| format!("disk{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(Snapshot::decode(&format!("{base} 0 0 {many}")).is_err());
+        assert!(Snapshot::decode(&format!("{base} 0 0 {}", "a".repeat(64))).is_err());
+        let mut s = Snapshot::decode(MQ2).unwrap();
+        s.disk = Some(DiskSnapshot {
+            devices: vec!["sda".into()],
+            rates: Some((f64::NAN, 0.0)),
+        });
+        assert!(s.encode().is_err());
+        assert!(Snapshot::decode(
+            &format!("{base} 0 0 sda").replace("unknown - 0", "unknown bad 0")
+        )
+        .is_err());
     }
 
     #[test]

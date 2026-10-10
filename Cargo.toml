@@ -1,10 +1,10 @@
 [package]
 name = "multiload-qubes"
-version = "0.5.1"
+version = "0.6.0"
 autobins = false
 edition = "2021"
 license = "GPL-2.0-or-later"
-description = "Qubes CPU, memory, network and swap graphs for the XFCE panel"
+description = "Qubes CPU, memory, network, swap and disk I/O graphs for the XFCE panel"
 
 [dependencies]
 multiload-qubes-snapshot = { path = "snapshot" }

@@ -1,6 +1,6 @@
 # Multiload for Qubes
 
-A native GTK3 XFCE panel plugin with scrolling CPU, RAM, network and per-domain swap graphs.
+A native GTK3 XFCE panel plugin with scrolling CPU, RAM, network, per-domain swap and disk I/O graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
 Rust implements collection, snapshot validation, history and Cairo rendering; a small C
 adapter handles GTK3/XFCE registration, events and settings. The collector CLI uses clap; Cargo.lock pins dependency versions. Slint is not required.
@@ -35,6 +35,12 @@ adapter handles GTK3/XFCE registration, events and settings. The collector CLI u
   and the five highest users by individual percentage. Disabled swap has no line;
   missing reports leave gaps and grey baseline marks, rather than fake zeroes.
   Restarted qubes start new line segments; historical lines remain until they scroll out.
+- **Disk I/O:** orange reads (`#ED7A00`) and light-orange writes (`#FFAB73`),
+  stacked bytes/second across supported physical disks visible in dom0. The
+  automatic scale follows the visible combined peak, rounded to a power of two
+  with a 1 KiB/s minimum. Its tooltip lists read/write rates and monitored disks.
+  This measures physical-device traffic, including guest storage and dom0 I/O,
+  rather than filesystem space occupied or disk busy percentage.
 - Stale/missing snapshots produce gaps with grey baseline marks, not fake zeroes.
 
 Colors, borders and dark gradient backgrounds match multiload-ng's default
@@ -90,7 +96,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.5.1-1*.rpm
+sudo dnf install ./multiload-qubes-0.6.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -127,8 +133,8 @@ The binary is not linked to the build machine’s versioned libxenstat soname. R
 Only the collector service has Xen privileges; the GUI never runs as root. Rust
 handles CPU accounting, guest connection lifecycle, memory aggregation, validation,
 timeouts and atomic publication at `/run/multiload-qubes/metrics`. Unix descriptor flags and process-group signals use `nix`; scoped SIGINT/SIGTERM
-registrations use `signal-hook`. The CLI and systemd unit are unchanged; MQ3
-extends snapshots with per-domain swap. Sampling defaults to 1s; changing the
+registrations use `signal-hook`. The systemd unit and collection options remain
+unchanged; MQ4 extends snapshots with disk rates and monitored-device names. Sampling defaults to 1s; changing the
 panel refresh interval changes chart history sampling, not collection frequency.
 
 The remaining Python code is the small payloads in `guest/memory.py`
@@ -201,14 +207,14 @@ measurements and dom0 packaging must still be validated on the target machine.
 
 Snapshot fields, units, validation and encoding/decoding live in the shared local
 Rust crate `snapshot/`. Both the collector and panel depend on its `Snapshot`
-type. The collector builds a typed snapshot and encodes MQ3; the panel decodes
+type. The collector builds a typed snapshot and encodes MQ4; the panel decodes
 through the same contract and applies the shared freshness policy. The shared
 crate has no Xen or GTK/Cairo dependencies, so the collector keeps its existing
 native dependencies. Atomic file replacement is unchanged.
 
-The decoder accepts MQ1, MQ2 and MQ3. The encoder writes MQ3 when swap is present,
-otherwise MQ2, preserving six timestamp decimals, four CPU decimals and three
-network-rate decimals.
+The decoder accepts MQ1 through MQ4. The encoder writes MQ4 when disk data is
+present, MQ3 when only swap is present, otherwise MQ2. It preserves six timestamp
+decimals, four CPU decimals and three network/disk rate decimals.
 Structural validation is independent of the clock. The panel additionally allows
 up to five seconds of future clock skew and max(5 seconds, four collection
 intervals) of age, preserving the old behavior. Workspace tests cover the shared
@@ -223,7 +229,12 @@ entries are comma-separated `incarnation_id:name:total_kib:used_kib` records, or
 restarts. Names come from dom0 metadata, never guest output; the shared codec
 validates bounded ASCII labels, unique names/IDs, totals and coverage. Files are
 bounded to 32 KiB and 129 swap entries (128 guest readers plus dom0).
-The GUI continues to accept MQ1/MQ2 snapshots during upgrades, with swap unavailable.
+MQ4 appends `read_bytes_per_second write_bytes_per_second disk_devices`. Rates
+are both `unknown` while warming up or with no devices; names are comma-separated,
+or `-` if none. MQ4 permits `unknown -` in the swap extension for missing swap data.
+Disk names are validated ASCII, unique, at most 63 bytes each, with at most 64 disks.
+The GUI continues to accept MQ1/MQ2/MQ3 snapshots during upgrades, with metrics
+absent from those versions shown as unavailable.
 
 ## Network collection and upgrading
 
@@ -291,6 +302,42 @@ shown above. There is nothing to install inside guests. Compare the tooltip with
 qube to check gaps and new line segments. Real guest reporting still needs testing
 in dom0; automated tests cover frames, accounting, coverage, histories and settings.
 
+## Disk I/O collection and upgrading
+
+The Rust collector reads `/sys/block/<disk>/stat`, the sysfs equivalent of the
+kernel's `/proc/diskstats` counters. No guest code, extra process, package or
+policy change is needed. Sector deltas are multiplied by 512 and divided by
+elapsed monotonic time. This is the kernel accounting sector size, independent
+of the drive's physical or logical sector size.
+
+Device selection uses sysfs topology: whole devices with hardware backing and no
+lower block devices. Partitions, virtual-device paths (including LVM, dm-crypt,
+software RAID, loop and zram), optical drives, MMC boot/RPMB devices and hidden
+NVMe paths are excluded. This counts the bottom device layer once instead of
+adding disks, partitions and mapped guest volumes together. Hardware RAID appears
+as the device(s) exposed by its controller. Unusual virtual/multipath topologies
+may have no supported device rather than silently selecting another layer.
+
+The graph covers storage attached to dom0. Disks owned by storage/USB qubes are
+outside this scope. Physical counters include metadata, swap, background writeback
+and other dom0 traffic; reads satisfied from caches generate no device reads.
+Summed RAID member traffic can exceed application traffic because it includes
+replication/parity. The chart is throughput, not latency or saturation.
+
+The first sample, a changed device set, a detected disk replacement or a counter
+reset establishes a baseline and leaves a gap. Replacement detection uses kernel
+`diskseq` when available, plus device number and sysfs path. Real idle rates are
+zero. Failed reads invalidate the whole disk sample, leave other charts running,
+and clear the baseline; journal messages report changed failures and recovery.
+`--once` lists devices but intentionally has unknown disk rates.
+
+Disk I/O is enabled automatically for old settings and can be hidden in Properties.
+After installing v0.6.0, restart the collector and panel using the commands above.
+In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
+then read/write a test file in a guest and allow for caching and delayed writes.
+Automated fixtures cover device selection, rates, resets, hotplug and invalid
+statistics; live host storage activity still needs checking in dom0.
+
 ## Connection diagnostics
 
 Each guest reader has three states: waiting for usable data, reporting with a
@@ -333,4 +380,4 @@ messages are suppressed across retries; recovery is still logged once.
 For example: `Guest metrics [dev RAM] unavailable: guest stream closed; command
 exit status 127; stderr: python3: command not found; retrying in 3.0s`.
 
-Out of scope: disk charts, per-qube controls, a separate tray frontend, and themes.
+Out of scope: per-qube controls, a separate tray frontend, and themes.

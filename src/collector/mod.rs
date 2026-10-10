@@ -1,4 +1,5 @@
 mod diagnostics;
+mod disk;
 pub mod protocol;
 mod shutdown;
 pub mod stream;
@@ -253,6 +254,7 @@ pub fn snapshot(
             .saturating_sub(host.free),
         period,
         swap: None,
+        disk: None,
         network: match network {
             Some(Reading::Network(rx, tx)) => Some((rx, tx)),
             _ => None,
@@ -299,6 +301,7 @@ pub struct Options {
 pub fn run(options: Options) -> Result<(), String> {
     let mut xen = xen::Xen::open()?;
     let mut cpu = CpuTracker::default();
+    let mut disk = disk::Collector::default();
     let start = Instant::now();
     if options.once {
         let host = xen.sample()?;
@@ -306,6 +309,7 @@ pub fn run(options: Options) -> Result<(), String> {
         let usage = protocol::dom0_used(&meminfo)?;
         let mut data = snapshot(&host, usage, &BTreeMap::new(), None, None, options.interval)?;
         data.swap = Some(swap_snapshot(&host, protocol::dom0_swap(&meminfo)?, None));
+        data.disk = disk.sample(start.elapsed());
         print!("{}", data.encode().map_err(|e| e.to_string())?);
         return Ok(());
     }
@@ -355,6 +359,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 protocol::dom0_swap(&meminfo)?,
                 memory.as_ref(),
             ));
+            data.disk = disk.sample(start.elapsed());
             publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
         })();
         if let Err(error) = result {
