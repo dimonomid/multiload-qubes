@@ -1,12 +1,17 @@
 [package]
 name = "multiload-qubes"
-version = "0.3.0"
+version = "0.4.0"
+autobins = false
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Whole-machine Qubes CPU and memory graphs for the XFCE panel"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "multiload-qubes-collector"
+path = "src/bin/collector.rs"
 
 [profile.release]
 panic = "abort"

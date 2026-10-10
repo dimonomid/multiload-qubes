@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -10,11 +10,11 @@ BuildRequires:  rust
 BuildRequires:  make
 BuildRequires:  pkgconfig(gtk+-3.0)
 BuildRequires:  pkgconfig(libxfce4panel-2.0)
+BuildRequires:  xen-devel
 BuildRequires:  python3
 BuildRequires:  systemd-rpm-macros
 Requires:       xfce4-panel
-Requires:       python3
-Requires:       python3-xen
+Requires:       xen-libs
 Requires:       /usr/bin/qvm-run
 %{?systemd_requires}
 
@@ -52,6 +52,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.0-1
+- Replace Python dom0 collector with Rust; preserve guest scripts and protocols
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.3.0-1
 - Sample guest RAM directly over persistent Qubes connections
 

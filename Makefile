@@ -9,11 +9,12 @@ CFLAGS ?= -O2 -g
 CPPFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) -ldl -lpthread -lm
 RUSTLIB = target/release/libmultiload_qubes.a
+COLLECTOR = target/release/multiload-qubes-collector
 
 .PHONY: all test check gui-test install rpm clean
-all: build/libmultiload-qubes.so build/multiload-qubes-preview
+all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR)
 
-$(RUSTLIB): Cargo.toml $(wildcard src/*.rs)
+$(RUSTLIB) $(COLLECTOR) &: Cargo.toml Cargo.lock $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs guest/*.py)
 	$(CARGO) build --release --offline
 
 build:
@@ -42,12 +43,12 @@ check: all test
 install: all
 	install -Dm755 build/libmultiload-qubes.so $(DESTDIR)$(LIBDIR)/xfce4/panel/plugins/libmultiload-qubes.so
 	install -Dm644 data/multiload-qubes.desktop $(DESTDIR)$(PREFIX)/share/xfce4/panel/plugins/multiload-qubes.desktop
-	install -Dm755 collector/collector.py $(DESTDIR)$(LIBEXECDIR)/multiload-qubes-collector
+	install -Dm755 $(COLLECTOR) $(DESTDIR)$(LIBEXECDIR)/multiload-qubes-collector
 	install -Dm644 data/multiload-qubes-collector.service $(DESTDIR)$(UNITDIR)/multiload-qubes-collector.service
 
 rpm:
 	mkdir -p build/rpm/SOURCES
-	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.3.0,' -czf build/rpm/SOURCES/multiload-qubes-0.3.0.tar.gz .
+	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.4.0,' -czf build/rpm/SOURCES/multiload-qubes-0.4.0.tar.gz .
 	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' packaging/multiload-qubes.spec
 
 clean:

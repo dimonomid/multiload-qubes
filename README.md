@@ -2,7 +2,7 @@
 
 A native GTK3 XFCE panel plugin with scrolling whole-machine CPU, RAM and network graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
-Rust implements snapshot validation, history and Cairo rendering; a small C
+Rust implements collection, snapshot validation, history and Cairo rendering; a small C
 adapter handles GTK3/XFCE registration, events and settings. No Cargo dependencies
 or network access are needed to build. Slint is not required.
 
@@ -37,7 +37,7 @@ under GPL-2.0-or-later.
 ## Build on the development machine
 
 ```bash
-sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel
+sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel xen-devel
 make
 make test
 ```
@@ -73,7 +73,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.3.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -93,14 +93,25 @@ For a staged install without touching the system: `make install DESTDIR=/tmp/mq-
 
 ## Collector and memory semantics
 
-A small Python service uses the Xen bindings already used by Qubes
-(`python3-xen`). Only the service has Xen privileges; the GUI never runs as root.
-It reads Xen allocation/CPU counters and atomically publishes a bounded numeric
-snapshot at `/run/multiload-qubes/metrics`. For guest memory and sys-net network
-counters, it runs read-only sampling loops through the existing Qubes command
-service. It does not alter balloon targets, change XenStore keys or permissions,
-modify qmemman, or install files inside guests. Sampling defaults to 1s; the
-panel's refresh interval changes history sampling, not collector frequency.
+The dom0 collector is a compiled **Rust executable**. It reads native Xen
+statistics through libxenstat and domain identities through libxenstore. Opaque
+handles avoid copying Xen-version-specific C structures into Rust. The installed
+libxenstat is loaded from system library directories and its required API symbols
+are checked before use; the binary is not linked to the build machine's versioned
+libxenstat soname. Runtime Xen libraries come from `xen-libs`; building needs
+`xen-devel` for the XenStore linker library. Live access still needs testing in dom0.
+
+Only the collector service has Xen privileges; the GUI never runs as root. Rust
+handles CPU accounting, guest connection lifecycle, memory aggregation, validation,
+timeouts and atomic publication at `/run/multiload-qubes/metrics`. Its CLI, systemd
+unit and MQ2 snapshot format are unchanged. Sampling defaults to 1s; changing the
+panel refresh interval changes chart history sampling, not collection frequency.
+
+The remaining Python code is the small, unchanged payloads in `guest/memory.py`
+and `guest/network.py`, embedded in the Rust binary and sent through Qubes' existing
+`qvm-run` tool. Nothing is installed inside guests. Qubes' own `qvm-run` is itself
+Python software; this refactor removes our Python collector, not Qubes' Python
+runtime. No balloon targets, XenStore keys/permissions, or qmemman behavior change.
 
 For dom0 and each reporting Linux guest:
 
@@ -119,7 +130,7 @@ on available memory instead of subtracting all buffers/cache.
 A persistent connection per running qube reads `/proc/meminfo` once per second.
 The guest must have the normal Qubes command agent, Python 3 and `xenstore-read`.
 Names come from dom0's XenStore domain names and are validated before use. Each
-report includes its guest domid; the collector also tracks Xen UUID handles and
+report includes its guest domid; the collector also tracks XenStore VM UUID paths and
 starts fresh connections when domain identities change. It never starts or
 unpauses qubes. Paused, stopped, unsupported or unreachable guests, internal
 stubdomains and guests missing required tools do not contribute a guessed usage.
@@ -132,7 +143,7 @@ allocation of reporting guests; red is the full allocation of non-reporting gues
 Xen/unattributed overhead is shown separately in the tooltip.
 
 Each monitored qube adds one Python sampling process inside that qube plus a
-persistent qvm-run process in dom0. This overhead scales with the number of guests;
+persistent qvm-run process and a Rust reader thread in dom0. This overhead scales with the number of guests;
 measure it on the target machine. Streams are bounded and rate-limited. At most
 128 memory connections are alive or shutting down at once; any additional guests
 remain unknown until capacity is available. The `--no-guest-memory` option disables
@@ -180,7 +191,7 @@ reads counters once per second. It selects device-backed interfaces in
 bridges). It counts external traffic once instead of summing each forwarding hop.
 All physical NICs in the selected qube are included, even disconnected NICs.
 
-The reader runs independently of Xen collection, validates bounded numeric output,
+The Rust reader runs independently of Xen collection, validates bounded numeric output,
 limits incoming sample frequency, and retries after disconnection. A source that
 stops reporting becomes unavailable within five seconds. Interface changes,
 counter resets and source reboots establish a new baseline rather than causing
