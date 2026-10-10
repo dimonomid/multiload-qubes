@@ -623,6 +623,198 @@ mod tests {
             assert!(reader.value().is_none());
         }
     }
+    struct Attempts(std::path::PathBuf);
+    impl Attempts {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "mq-reader-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn script(&self, body: &str) -> String {
+            // Each attempt records its PID before doing any reporting or failing.
+            format!(
+                "import os,time,pathlib\np=pathlib.Path({:?})/'pids'\nwith p.open('a') as f: f.write(str(os.getpid())+'\\n')\n{body}",
+                self.0.to_str().unwrap()
+            )
+        }
+        fn pids(&self) -> Vec<Pid> {
+            std::fs::read_to_string(self.0.join("pids"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| Pid::from_raw(line.parse().unwrap()))
+                .collect()
+        }
+        fn assert_reaped(&self) {
+            let pids = self.pids();
+            assert!(!pids.is_empty(), "helper never started");
+            for pid in pids {
+                assert_eq!(
+                    nix::sys::signal::kill(pid, None),
+                    Err(Errno::ESRCH),
+                    "helper {pid} survived or was not reaped"
+                );
+            }
+        }
+    }
+    impl Drop for Attempts {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn await_retry(reader: &Reader) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if matches!(
+                reader.connection.lock().unwrap().state,
+                ConnectionState::Retrying { .. }
+            ) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reader did not enter retry state"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn repeated_failed_reconnects_are_reaped_and_eventually_recover() {
+        let attempts = Attempts::new();
+        let reader = Reader::spawn(
+            spec(&attempts.script(
+                "if len(p.read_text().splitlines()) <= 3: raise SystemExit(7)\nprint('M1 23 1000 400',flush=True)\ntime.sleep(30)",
+            )),
+            Kind::Memory(23),
+            Timing {
+                stale: Duration::from_secs(30),
+                retry: Duration::from_millis(200),
+            },
+        )
+        .unwrap();
+        await_retry(&reader);
+        assert_eq!(reader.value(), None);
+        attempts.assert_reaped();
+        // A failed attempt must wait for its retry deadline, not spin spawning.
+        let count = attempts.pids().len();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(attempts.pids().len(), count);
+        await_value(&reader, Reading::Memory(600));
+        assert_eq!(attempts.pids().len(), 4);
+        assert_eq!(reader.connection.lock().unwrap().last_error, None);
+        let start = Instant::now();
+        drop(reader);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        attempts.assert_reaped();
+    }
+
+    #[test]
+    fn failed_spawn_can_recover_and_stop_during_retry() {
+        let attempts = Attempts::new();
+        let program = attempts.0.join("reporter");
+        let mut command =
+            spec(&attempts.script("print('M1 23 1000 400',flush=True)\ntime.sleep(30)"));
+        command.program = program.to_str().unwrap().into();
+        let reader = Reader::spawn(
+            command.clone(),
+            Kind::Memory(23),
+            Timing {
+                stale: Duration::from_secs(30),
+                retry: Duration::from_millis(100),
+            },
+        )
+        .unwrap();
+        await_retry(&reader);
+        assert_eq!(reader.value(), None);
+        assert!(attempts.pids().is_empty());
+        std::os::unix::fs::symlink("/usr/bin/python3", &program).unwrap();
+        await_value(&reader, Reading::Memory(600));
+        drop(reader);
+        attempts.assert_reaped();
+
+        std::fs::remove_file(program).unwrap();
+        let reader = Reader::spawn(
+            command,
+            Kind::Memory(23),
+            Timing {
+                retry: Duration::from_secs(30),
+                ..timing()
+            },
+        )
+        .unwrap();
+        await_retry(&reader);
+        let start = Instant::now();
+        drop(reader);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(attempts.pids().len(), 1);
+    }
+
+    #[test]
+    fn shutdown_interrupts_silent_and_reporting_sessions_and_reaps_children() {
+        for body in [
+            "time.sleep(30)",
+            "print('M1 23 1000 400',flush=True)\ntime.sleep(30)",
+        ] {
+            let attempts = Attempts::new();
+            let reader = Reader::spawn(
+                spec(&attempts.script(body)),
+                Kind::Memory(23),
+                Timing {
+                    stale: Duration::from_secs(30),
+                    retry: Duration::from_secs(30),
+                },
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while attempts.pids().is_empty() {
+                assert!(Instant::now() < deadline, "helper never started");
+                thread::sleep(Duration::from_millis(5));
+            }
+            if body.starts_with("print") {
+                await_value(&reader, Reading::Memory(600));
+            }
+            let start = Instant::now();
+            reader.stop();
+            assert_eq!(reader.value(), None);
+            while !reader.finished() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(1),
+                    "worker did not stop"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            drop(reader);
+            attempts.assert_reaped();
+        }
+    }
+
+    #[test]
+    fn shutdown_interrupts_long_retry_wait_without_another_attempt() {
+        let attempts = Attempts::new();
+        let reader = Reader::spawn(
+            spec(&attempts.script("raise SystemExit(7)")),
+            Kind::Memory(23),
+            Timing {
+                retry: Duration::from_secs(30),
+                ..timing()
+            },
+        )
+        .unwrap();
+        await_retry(&reader);
+        attempts.assert_reaped();
+        let start = Instant::now();
+        drop(reader);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(attempts.pids().len(), 1);
+        attempts.assert_reaped();
+    }
+
     #[test]
     fn qubes_command_never_autostarts() {
         let cmd = CommandSpec::qube("dev", Kind::Memory(23));
