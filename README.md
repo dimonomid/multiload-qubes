@@ -109,7 +109,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.8.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.8.1-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -120,7 +120,8 @@ per panel instance. Hovering a chart shows only its own metrics; moving between
 charts switches the tooltip. Network and disk tooltips also state the speed
 represented by a full chart, using the combined in/out or read/write scale for
 the currently visible history. Resizing a chart updates that scale. Vertical panels stack the graphs and use the same
-per-chart tooltips. At least one chart stays enabled.
+per-chart tooltips. Properties labels the individual-domain charts `Per-qube CPU`,
+`Per-qube RAM` and `Per-qube swap`. At least one chart stays enabled.
 
 To remove it, first remove the panel item, then:
 
@@ -302,7 +303,7 @@ stream reader with local child processes, protocol validation and guest NIC sele
 
 ## Per-qube CPU chart and upgrading
 
-Qube CPU is enabled by default, can be hidden independently in Properties, and
+`Per-qube CPU` is enabled by default, can be hidden independently in Properties, and
 appears immediately after host CPU in both panel orientations. It shares the
 pixel-sharp domain graph renderer and stable per-name color tints with Qube RAM
 and swap. Lines use multiload-ng's bright CPU blue `#48BDE6`, with a dark `#036F96`
@@ -328,7 +329,7 @@ budget. A `--once` snapshot cannot derive per-qube CPU rates from one sample.
 Xen scheduling weights, affinity and caps are not changed; the chart does not
 measure runnable time denied by Xen or work performed in dom0 on a qube's behalf.
 
-After installing v0.8.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.8.1, restart the collector and run `xfce4-panel -r`. Compare a
 CPU-loaded qube with its online vCPU count in `xl list`; a four-vCPU qube at 100%
 contributes 25% to a sixteen-logical-CPU host. Live Xen reporting still needs
 checking in dom0; fixtures cover normalization, online counts, resets, restart,
@@ -336,7 +337,7 @@ pause/resume, serialization, chart ordering and settings.
 
 ## Per-qube RAM chart and upgrading
 
-Qube RAM is enabled by default and can be hidden independently in Properties. It
+`Per-qube RAM` is enabled by default and can be hidden independently in Properties. It
 appears immediately after host RAM in horizontal and vertical panels. Both use
 existing M1/M2 guest memory frames: the collector now retains each frame's
 `MemTotal` as well as used RAM. The guest payload and connection count are
@@ -353,7 +354,7 @@ allocation and unknown usage. Guest totals are not replaced with configured
 maximum memory or Xen allocation. Reclaimable memory is accounted for through
 `MemAvailable`; swap is excluded.
 
-After installing v0.8.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.8.1, restart the collector and run `xfce4-panel -r`. Compare a
 qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
 its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
 Qube RAM needs MQ5 data from the updated collector.
@@ -412,7 +413,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.8.0, restart the collector and panel using the commands above.
+After installing v0.8.1, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid

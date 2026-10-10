@@ -177,11 +177,11 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     GtkWidget *width = gtk_spin_button_new_with_range(0, 512, 1);
     GtkWidget *interval = gtk_spin_button_new_with_range(250, 10000, 250);
     GtkWidget *cpu = gtk_check_button_new_with_label("CPU");
-    GtkWidget *qube_cpu = gtk_check_button_new_with_label("Qube CPU");
+    GtkWidget *qube_cpu = gtk_check_button_new_with_label("Per-qube CPU");
     GtkWidget *ram = gtk_check_button_new_with_label("RAM");
-    GtkWidget *qube_ram = gtk_check_button_new_with_label("Qube RAM");
+    GtkWidget *qube_ram = gtk_check_button_new_with_label("Per-qube RAM");
     GtkWidget *network = gtk_check_button_new_with_label("Network");
-    GtkWidget *swap = gtk_check_button_new_with_label("Swap");
+    GtkWidget *swap = gtk_check_button_new_with_label("Per-qube swap");
     GtkWidget *disk = gtk_check_button_new_with_label("Disk I/O");
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(width), p->width);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(interval), p->interval);
@@ -203,7 +203,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     gtk_grid_attach(GTK_GRID(grid), network, 0, 4, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), swap, 1, 4, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), disk, 0, 5, 2, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown\nQube RAM: bright lines per domain; faint fill = highest usage\n100% = that domain's current guest-visible RAM\nSwap: purple lines per domain; light fill = highest usage\n100% = one domain’s enabled swap; grey marks = missing reports\nDisk: orange = read; light orange = write"), 0, 6, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown\nPer-qube RAM: bright lines per domain; faint fill = highest usage\n100% = that domain's current guest-visible RAM\nPer-qube swap: purple lines per domain; light fill = highest usage\n100% = one domain’s enabled swap; grey marks = missing reports\nDisk: orange = read; light orange = write"), 0, 6, 2, 1);
     gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(p->dialog))), grid);
     Settings *s = g_new0(Settings, 1);
     *s = (Settings){p, width, interval, cpu, qube_cpu, ram, qube_ram, network, swap, disk};
@@ -214,7 +214,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.8.0",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.8.1",
         "comments", "CPU, RAM, network, swap and disk I/O graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }
