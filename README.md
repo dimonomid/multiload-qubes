@@ -3,8 +3,7 @@
 A native GTK3 XFCE panel plugin with scrolling whole-machine CPU, RAM and network graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
 Rust implements collection, snapshot validation, history and Cairo rendering; a small C
-adapter handles GTK3/XFCE registration, events and settings. No Cargo dependencies
-or network access are needed to build. Slint is not required.
+adapter handles GTK3/XFCE registration, events and settings. The collector CLI uses clap; Cargo.lock pins dependency versions. Slint is not required.
 
 ## Graphs
 
@@ -38,6 +37,7 @@ under GPL-2.0-or-later.
 
 ```bash
 sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel xen-devel
+cargo fetch --locked
 make
 make test
 ```
@@ -63,7 +63,9 @@ sudo dnf install rpm-build systemd-rpm-macros
 make rpm
 ```
 
-RPMs and a source RPM are written under `build/rpm/`. **Build against your dom0
+RPMs and a source RPM are written under `build/rpm/`. The source RPM bundles
+Cargo dependencies and builds offline; the initial development checkout needs
+`cargo fetch --locked` once before the offline Make targets. **Build against your dom0
 distribution**, typically in a matching disposable build VM. An RPM compiled on
 this Fedora 43 development machine is not guaranteed to run on an older dom0:
 Rust, GLib, GTK and glibc minimum versions can differ. Use the source RPM or source
@@ -73,7 +75,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.1-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 

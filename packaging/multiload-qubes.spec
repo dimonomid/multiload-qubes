@@ -1,9 +1,10 @@
 Name:           multiload-qubes
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
 Source0:        %{name}-%{version}.tar.gz
+Source1:        %{name}-%{version}-vendor.tar.gz
 BuildRequires:  gcc
 BuildRequires:  cargo
 BuildRequires:  rust
@@ -24,6 +25,9 @@ A read-only dom0 collector publishes Xen allocation and guest-reported usage.
 
 %prep
 %autosetup
+tar -xzf %{SOURCE1}
+mkdir -p .cargo
+cp packaging/cargo-vendor.toml .cargo/config.toml
 
 %build
 %make_build CFLAGS='%{optflags}'
@@ -52,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.1-1
+- Replace custom CLI parsing with clap; bundle dependencies for offline RPM builds
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.0-1
 - Replace Python dom0 collector with Rust; preserve guest scripts and protocols
 
