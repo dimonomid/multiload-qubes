@@ -157,7 +157,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.4.5",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.4.6",
         "comments", "Whole-machine CPU, RAM and network graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }

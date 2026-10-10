@@ -1,12 +1,13 @@
 [package]
 name = "multiload-qubes"
-version = "0.4.5"
+version = "0.4.6"
 autobins = false
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Whole-machine Qubes CPU and memory graphs for the XFCE panel"
 
 [dependencies]
+multiload-qubes-snapshot = { path = "snapshot" }
 libloading = "0.9"
 strip-ansi-escapes = "0.2"
 clap = { version = "4.6", features = ["derive"] }
@@ -24,3 +25,7 @@ path = "src/bin/collector.rs"
 panic = "abort"
 lto = true
 codegen-units = 1
+
+[workspace]
+members = ["snapshot"]
+resolver = "2"

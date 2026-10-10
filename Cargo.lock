@@ -162,14 +162,19 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "multiload-qubes"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "clap",
  "libloading",
+ "multiload-qubes-snapshot",
  "nix",
  "signal-hook",
  "strip-ansi-escapes",
 ]
+
+[[package]]
+name = "multiload-qubes-snapshot"
+version = "0.1.0"
 
 [[package]]
 name = "nix"

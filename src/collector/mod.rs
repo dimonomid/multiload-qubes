@@ -4,6 +4,7 @@ mod shutdown;
 pub mod stream;
 pub mod xen;
 
+use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use protocol::{Kind, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -183,7 +184,7 @@ pub fn snapshot(
     cpu: Option<f64>,
     network: Option<Reading>,
     period: f64,
-) -> Result<String, String> {
+) -> Result<Snapshot, String> {
     let (mut allocated, mut used, mut unknown) = (0_u64, 0_u64, 0_u64);
     for d in &host.domains {
         allocated = allocated
@@ -204,26 +205,25 @@ pub fn snapshot(
                 .ok_or("unknown allocation overflow")?;
         }
     }
-    if host.total == 0 || allocated > host.total {
-        return Err("inconsistent Xen memory snapshot".into());
-    }
-    let overhead = host
-        .total
-        .saturating_sub(allocated)
-        .saturating_sub(host.free);
-    let cpu = cpu.map_or_else(|| "unknown".into(), |v| format!("{v:.4}"));
-    let net = match network {
-        Some(Reading::Network(rx, tx)) => format!("{rx:.3} {tx:.3}"),
-        _ => "unknown unknown".into(),
+    let snapshot = Snapshot {
+        timestamp: unix_time_now().map_err(|e| e.to_string())?,
+        cpu,
+        total: host.total,
+        allocated,
+        used,
+        unknown,
+        overhead: host
+            .total
+            .saturating_sub(allocated)
+            .saturating_sub(host.free),
+        period,
+        network: match network {
+            Some(Reading::Network(rx, tx)) => Some((rx, tx)),
+            _ => None,
+        },
     };
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs_f64();
-    Ok(format!(
-        "MQ2 {stamp:.6} {cpu} {} {allocated} {used} {unknown} {overhead} {period} {net}\n",
-        host.total
-    ))
+    snapshot.validate().map_err(|e| e.to_string())?;
+    Ok(snapshot)
 }
 
 pub fn publish(path: &Path, text: &str) -> Result<(), String> {
@@ -271,6 +271,8 @@ pub fn run(options: Options) -> Result<(), String> {
         print!(
             "{}",
             snapshot(&host, usage, &BTreeMap::new(), None, None, options.interval)?
+                .encode()
+                .map_err(|e| e.to_string())?
         );
         return Ok(());
     }
@@ -308,7 +310,7 @@ pub fn run(options: Options) -> Result<(), String> {
             let dom0 = protocol::dom0_used(
                 &fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?,
             )?;
-            let text = snapshot(
+            let data = snapshot(
                 &host,
                 dom0,
                 &readings,
@@ -316,7 +318,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 network.as_ref().and_then(Reader::value),
                 options.interval,
             )?;
-            publish(&options.output, &text)
+            publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
         })();
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
@@ -378,7 +380,7 @@ mod tests {
         let h = host();
         let mut readings = BTreeMap::new();
         readings.insert(1, 1500);
-        let line = snapshot(
+        let data = snapshot(
             &h,
             400,
             &readings,
@@ -387,12 +389,14 @@ mod tests {
             1.0,
         )
         .unwrap();
-        let p: Vec<_> = line.split_whitespace().collect();
-        assert_eq!(
-            &p[2..],
-            &["50.0000", "4000", "3000", "1400", "1000", "100", "1", "1234.500", "678.250"]
-        );
-        assert!(multiload_qubes::Sample::parse(&line).is_some());
+        assert_eq!(data.cpu, Some(50.0));
+        assert_eq!(data.total, 4000);
+        assert_eq!(data.allocated, 3000);
+        assert_eq!(data.used, 1400);
+        assert_eq!(data.unknown, 1000);
+        assert_eq!(data.overhead, 100);
+        assert_eq!(data.period, 1.0);
+        assert_eq!(data.network, Some((1234.5, 678.25)));
         let mut invalid = h;
         invalid.total = 10;
         assert!(snapshot(&invalid, 0, &readings, None, None, 1.0).is_err());

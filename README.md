@@ -81,7 +81,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.5-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.6-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -187,6 +187,20 @@ measurements and dom0 packaging must still be validated on the target machine.
    restart, Properties, persisted settings, and service stop/restart. Data should
    become unavailable within a few seconds of collector failure.
 7. Check idle overhead with `top`/`ps` on the collector and XFCE plugin wrapper.
+
+Snapshot fields, units, validation and encoding/decoding live in the shared local
+Rust crate `snapshot/`. Both the collector and panel depend on its `Snapshot`
+type. The collector builds a typed snapshot and encodes MQ2; the panel decodes
+through the same contract and applies the shared freshness policy. The shared
+crate has no Xen or GTK/Cairo dependencies, so the collector keeps its existing
+native dependencies. Atomic file replacement is unchanged.
+
+The decoder accepts MQ1 and MQ2; the encoder writes the existing MQ2 layout and
+precision (six timestamp decimals, four CPU decimals, three network-rate decimals).
+Structural validation is independent of the clock. The panel additionally allows
+up to five seconds of future clock skew and max(5 seconds, four collection
+intervals) of age, preserving the old behavior. Workspace tests cover the shared
+codec, legacy compatibility and freshness separately from rendering/collection.
 
 The versioned snapshot format is:
 `MQ1 unix_timestamp cpu_percent|unknown total_kib allocated_kib used_kib unknown_allocation_kib overhead_kib collector_period_seconds`.
