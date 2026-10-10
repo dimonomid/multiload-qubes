@@ -81,7 +81,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.4-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.5-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -257,8 +257,25 @@ The first usable measurement after failure logs recovery once. Normal reader
 shutdown is not treated as a failure. Idle zero measurements are valid data.
 
 Reasons cover launch/I/O failures, closed streams, timeouts and invalid reports.
-Raw guest stderr is still suppressed; a closed-stream diagnostic does not include
-an underlying shell/qrexec error message. No guest-provided text is forwarded to
-the journal.
+Failure messages include the command's exit code or terminating signal when
+available, plus a sanitized stderr excerpt. The reader retains at most 4 KiB of
+stderr tail, drains excess output without keeping it, and limits each read turn to
+64 KiB so stderr cannot monopolize metrics collection. Stderr does not refresh
+the metrics timeout and is not streamed into the journal during normal operation.
+
+Journal excerpts are at most 1 KiB of single-line ASCII text, plus a truncation
+marker when needed. ANSI sequences are stripped using `strip-ansi-escapes`, other
+controls are removed, whitespace is collapsed, and non-ASCII characters are
+escaped (including bidirectional formatting characters and invalid UTF-8).
+
+After a failure, exit-status collection waits no more than 250 ms, continuing to
+drain stderr nonblockingly. A command that closes stdout but remains alive is
+reported as having no exit status yet; our cleanup SIGTERM/SIGKILL is not presented
+as the original cause. Status inspection uses `nix::waitid` with `WNOWAIT`, leaving
+PID ownership/reaping with the existing process guard. Identical complete failure
+messages are suppressed across retries; recovery is still logged once.
+
+For example: `Guest metrics [dev RAM] unavailable: guest stream closed; command
+exit status 127; stderr: python3: command not found; retrying in 3.0s`.
 
 Out of scope: disk charts, per-qube UI, a separate tray frontend, and themes.

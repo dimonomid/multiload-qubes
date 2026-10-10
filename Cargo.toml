@@ -1,6 +1,6 @@
 [package]
 name = "multiload-qubes"
-version = "0.4.4"
+version = "0.4.5"
 autobins = false
 edition = "2021"
 license = "GPL-2.0-or-later"
@@ -8,6 +8,7 @@ description = "Whole-machine Qubes CPU and memory graphs for the XFCE panel"
 
 [dependencies]
 libloading = "0.9"
+strip-ansi-escapes = "0.2"
 clap = { version = "4.6", features = ["derive"] }
 nix = { version = "0.31", features = ["fs", "process", "signal"] }
 signal-hook = { version = "0.4", default-features = false }

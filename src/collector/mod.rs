@@ -1,3 +1,4 @@
+mod diagnostics;
 pub mod protocol;
 mod shutdown;
 pub mod stream;

@@ -1,3 +1,4 @@
+use super::diagnostics::StderrCapture;
 use super::protocol::{shell_quote, Kind, Reading, Tracker, MEMORY_SCRIPT, NETWORK_SCRIPT};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
@@ -255,64 +256,138 @@ fn session(
         .args(&spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0);
     let mut proc = Process(command.spawn().map_err(|e| e.to_string())?);
     let mut stdout = proc.0.stdout.take().ok_or("missing stdout")?;
     set_nonblocking(&stdout).map_err(|e| e.to_string())?;
-    let mut tracker = Tracker::new(kind);
-    let mut buffer = Vec::new();
-    let mut chunk = [0; 4096];
-    let mut last = Instant::now();
-    let mut budget_time = last;
-    let mut budget = 8.0_f64;
-    while !stop.load(Ordering::Relaxed) {
-        if last.elapsed() > timing.stale {
-            return Err("reporter timed out".into());
-        }
-        match stdout.read(&mut chunk) {
-            Ok(0) => return Err("guest stream closed".into()),
-            Ok(n) => {
-                buffer.extend_from_slice(&chunk[..n]);
-                if buffer.len() > 8192 {
-                    return Err("oversized guest stream".into());
-                }
-                while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                    let now = Instant::now();
-                    budget = (budget + now.duration_since(budget_time).as_secs_f64() * 4.0)
-                        .min(8.0)
-                        - 1.0;
-                    budget_time = now;
-                    if budget < 0.0 {
-                        return Err("guest exceeded sample rate limit".into());
-                    }
-                    let reading = tracker.update(&buffer[..end])?;
-                    buffer.drain(..=end);
-                    last = now;
-                    let recovered = connection
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .report(reading, now);
-                    if recovered {
-                        eprintln!("Guest metrics [{}] recovered", spec.source);
-                    }
-                }
+    let mut stderr = proc.0.stderr.take().ok_or("missing stderr")?;
+    set_nonblocking(&stderr).map_err(|e| e.to_string())?;
+    let mut captured = StderrCapture::default();
+    let result = (|| -> Result<(), String> {
+        let mut tracker = Tracker::new(kind);
+        let mut buffer = Vec::new();
+        let mut chunk = [0; 4096];
+        let mut last = Instant::now();
+        let mut budget_time = last;
+        let mut budget = 8.0_f64;
+        while !stop.load(Ordering::Relaxed) {
+            captured
+                .drain(&mut stderr)
+                .map_err(|e| format!("cannot read guest stderr: {e}"))?;
+            if last.elapsed() > timing.stale {
+                return Err("reporter timed out".into());
             }
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::Interrupted =>
-            {
-                thread::sleep(Duration::from_millis(20))
+            match stdout.read(&mut chunk) {
+                Ok(0) => return Err("guest stream closed".into()),
+                Ok(n) => {
+                    buffer.extend_from_slice(&chunk[..n]);
+                    if buffer.len() > 8192 {
+                        return Err("oversized guest stream".into());
+                    }
+                    while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                        let now = Instant::now();
+                        budget = (budget + now.duration_since(budget_time).as_secs_f64() * 4.0)
+                            .min(8.0)
+                            - 1.0;
+                        budget_time = now;
+                        if budget < 0.0 {
+                            return Err("guest exceeded sample rate limit".into());
+                        }
+                        let reading = tracker.update(&buffer[..end])?;
+                        buffer.drain(..=end);
+                        last = now;
+                        let recovered = connection
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .report(reading, now);
+                        if recovered {
+                            eprintln!("Guest metrics [{}] recovered", spec.source);
+                        }
+                    }
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted =>
+                {
+                    thread::sleep(Duration::from_millis(20))
+                }
+                Err(e) => return Err(e.to_string()),
             }
-            Err(e) => return Err(e.to_string()),
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    result.map_err(|reason| captured.failure_details(&reason, &proc.0, &mut stderr, stop))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_error(script: &str, stale: Duration) -> String {
+        session(
+            &spec(script),
+            Kind::Memory(23),
+            Timing { stale, ..timing() },
+            &AtomicBool::new(false),
+            &Arc::new(Mutex::new(Connection::new())),
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn reports_exit_status_and_sanitized_stderr() {
+        let error = session_error(
+            "import sys; sys.stderr.write('\\x1b[31mPermission denied\\x1b[0m\\n'); sys.exit(7)",
+            Duration::from_secs(2),
+        );
+        assert!(error.contains("exit status 7"), "{error}");
+        assert!(error.contains("stderr: Permission denied"), "{error}");
+        assert!(error.is_ascii() && !error.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn reports_signal_exit_without_replacing_the_original_failure() {
+        let error = session_error("import os,signal,sys; sys.stderr.write('crashed\\n'); sys.stderr.flush(); os.kill(os.getpid(),signal.SIGTERM)", Duration::from_secs(2));
+        assert!(error.contains("signal SIGTERM"), "{error}");
+        assert!(error.contains("stderr: crashed"), "{error}");
+        let error = session_error("import sys; sys.stderr.write('script failed\\n'); sys.stderr.flush(); print('M1 24 1000 400',flush=True); sys.exit(9)", Duration::from_secs(2));
+        assert!(error.contains("changed domain"), "{error}");
+        assert!(error.contains("exit status 9"), "{error}");
+        assert!(error.contains("stderr: script failed"), "{error}");
+    }
+
+    #[test]
+    fn stderr_flood_does_not_block_usable_metrics() {
+        let reader = Reader::spawn(spec("import sys,time; sys.stderr.write('x'*2_000_000); sys.stderr.flush(); print('M1 23 1000 400',flush=True); time.sleep(20)"),
+            Kind::Memory(23), Timing { stale: Duration::from_secs(2), ..timing() }).unwrap();
+        await_value(&reader, Reading::Memory(600));
+    }
+
+    #[test]
+    fn stderr_only_flood_does_not_refresh_metrics_timeout() {
+        let start = Instant::now();
+        let error = session_error(
+            "import os; exec(\"while True: os.write(2,b'x'*4096)\")",
+            Duration::from_millis(150),
+        );
+        assert!(error.contains("reporter timed out"), "{error}");
+        assert!(error.contains("[truncated]"));
+        assert!(error.len() < 1300);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn closed_stdout_with_open_stderr_has_a_bounded_status_wait() {
+        let start = Instant::now();
+        let error = session_error("import os,sys,time; sys.stderr.write('stdout closed\\n'); sys.stderr.flush(); os.close(1); time.sleep(20)", Duration::from_secs(2));
+        assert!(error.contains("guest stream closed"), "{error}");
+        assert!(error.contains("exit status not yet available"), "{error}");
+        assert!(error.contains("stderr: stdout closed"), "{error}");
+        // Do not report our cleanup SIGTERM as the cause of the failure.
+        assert!(!error.contains("SIGTERM"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn connection_states_suppress_repeat_errors_and_log_one_recovery() {
@@ -501,7 +576,8 @@ mod tests {
         loop {
             let state = reader.connection.lock().unwrap().state.clone();
             if let ConnectionState::Retrying { reason, retry_at } = state {
-                assert_eq!(reason, "guest stream closed");
+                assert!(reason.starts_with("guest stream closed"));
+                assert!(reason.contains("exit status 0"));
                 assert!(retry_at > Instant::now());
                 assert_eq!(reader.value(), None);
                 break;

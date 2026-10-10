@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.4.4
+Version:        0.4.5
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.5-1
+- Include command exit status and bounded sanitized stderr in failure diagnostics
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.4.4-1
 - Track waiting/reporting/retrying states and log guest failures and recoveries
 
