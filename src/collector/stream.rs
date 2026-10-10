@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct CommandSpec {
+    pub source: String,
     pub program: String,
     pub args: Vec<String>,
 }
@@ -26,6 +27,13 @@ impl CommandSpec {
             Kind::Network => NETWORK_SCRIPT,
         };
         Self {
+            source: format!(
+                "{name} {}",
+                match kind {
+                    Kind::Memory(_) => "RAM",
+                    Kind::Network => "network",
+                }
+            ),
             program: "qvm-run".into(),
             args: vec![
                 "--pass-io".into(),
@@ -87,43 +95,137 @@ fn set_nonblocking(fd: &impl AsFd) -> Result<(), Errno> {
     Ok(())
 }
 
-type Latest = Arc<Mutex<Option<(Instant, Option<Reading>)>>>;
+#[derive(Clone, Debug, PartialEq)]
+enum ConnectionState {
+    Waiting,
+    Reporting {
+        reading: Reading,
+        received_at: Instant,
+    },
+    Retrying {
+        reason: String,
+        retry_at: Instant,
+    },
+}
+
+struct Connection {
+    state: ConnectionState,
+    // Retained across reconnect/warmup attempts to suppress repeated failures.
+    // Cleared only when an actual measurement recovers.
+    last_error: Option<String>,
+}
+impl Connection {
+    fn new() -> Self {
+        Self {
+            state: ConnectionState::Waiting,
+            last_error: None,
+        }
+    }
+
+    fn report(&mut self, reading: Option<Reading>, received_at: Instant) -> bool {
+        match reading {
+            Some(reading) => {
+                self.state = ConnectionState::Reporting {
+                    reading,
+                    received_at,
+                };
+                self.last_error.take().is_some()
+            }
+            None => {
+                self.state = ConnectionState::Waiting;
+                false
+            }
+        }
+    }
+
+    fn retry(&mut self, reason: String, retry_at: Instant) -> bool {
+        let changed = self.last_error.as_ref() != Some(&reason);
+        self.last_error = Some(reason.clone());
+        self.state = ConnectionState::Retrying { reason, retry_at };
+        changed
+    }
+
+    fn value(&self, now: Instant, stale: Duration) -> Option<Reading> {
+        match self.state {
+            ConnectionState::Reporting {
+                reading,
+                received_at,
+            } if now.saturating_duration_since(received_at) <= stale => Some(reading),
+            _ => None,
+        }
+    }
+}
+
+type SharedConnection = Arc<Mutex<Connection>>;
 pub struct Reader {
     stop: Arc<AtomicBool>,
-    latest: Latest,
+    connection: SharedConnection,
     thread: Option<JoinHandle<()>>,
     timing: Timing,
 }
 impl Reader {
     pub fn spawn(spec: CommandSpec, kind: Kind, timing: Timing) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
-        let latest: Latest = Arc::new(Mutex::new(None));
-        let (worker_stop, worker_latest) = (stop.clone(), latest.clone());
+        let connection = Arc::new(Mutex::new(Connection::new()));
+        let (worker_stop, worker_connection) = (stop.clone(), connection.clone());
         let thread = thread::Builder::new()
             .name("guest-metrics".into())
             .spawn(move || {
                 while !worker_stop.load(Ordering::Relaxed) {
-                    let _ = session(&spec, kind, timing, &worker_stop, &worker_latest);
-                    *worker_latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                    let deadline = Instant::now() + timing.retry;
+                    worker_connection
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .state = ConnectionState::Waiting;
+                    let result = session(&spec, kind, timing, &worker_stop, &worker_connection);
+                    if worker_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let reason = result.err().unwrap_or_else(|| "guest stream closed".into());
+                    let (notify, state) = {
+                        let mut connection =
+                            worker_connection.lock().unwrap_or_else(|e| e.into_inner());
+                        let notify = connection.retry(reason, Instant::now() + timing.retry);
+                        (notify, connection.state.clone())
+                    };
+                    let ConnectionState::Retrying {
+                        reason,
+                        retry_at: deadline,
+                    } = state
+                    else {
+                        unreachable!("retry records Retrying state")
+                    };
+                    if notify {
+                        eprintln!(
+                            "Guest metrics [{}] unavailable: {}; retrying in {:.1}s",
+                            spec.source,
+                            reason,
+                            timing.retry.as_secs_f64()
+                        );
+                    }
                     while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                         thread::sleep(Duration::from_millis(20));
                     }
                 }
+                worker_connection
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .state = ConnectionState::Waiting;
             })?;
         Ok(Self {
             stop,
-            latest,
+            connection,
             thread: Some(thread),
             timing,
         })
     }
     pub fn value(&self) -> Option<Reading> {
-        let value = self.latest.lock().unwrap_or_else(|e| e.into_inner());
-        value
-            .as_ref()
-            .filter(|(time, _)| time.elapsed() <= self.timing.stale)
-            .and_then(|(_, v)| *v)
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .value(Instant::now(), self.timing.stale)
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -146,7 +248,7 @@ fn session(
     kind: Kind,
     timing: Timing,
     stop: &AtomicBool,
-    latest: &Latest,
+    connection: &SharedConnection,
 ) -> Result<(), String> {
     let mut command = Command::new(&spec.program);
     command
@@ -169,7 +271,7 @@ fn session(
             return Err("reporter timed out".into());
         }
         match stdout.read(&mut chunk) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Err("guest stream closed".into()),
             Ok(n) => {
                 buffer.extend_from_slice(&chunk[..n]);
                 if buffer.len() > 8192 {
@@ -187,7 +289,13 @@ fn session(
                     let reading = tracker.update(&buffer[..end])?;
                     buffer.drain(..=end);
                     last = now;
-                    *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some((now, reading));
+                    let recovered = connection
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .report(reading, now);
+                    if recovered {
+                        eprintln!("Guest metrics [{}] recovered", spec.source);
+                    }
                 }
             }
             Err(e)
@@ -205,6 +313,56 @@ fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_states_suppress_repeat_errors_and_log_one_recovery() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(3);
+        let mut connection = Connection::new();
+        assert_eq!(connection.state, ConnectionState::Waiting);
+        assert_eq!(connection.value(now, Duration::from_secs(5)), None);
+        assert!(connection.retry("reporter timed out".into(), deadline));
+        assert_eq!(
+            connection.state,
+            ConnectionState::Retrying {
+                reason: "reporter timed out".into(),
+                retry_at: deadline,
+            }
+        );
+        // A reconnect/warmup does not erase the last failure or claim recovery.
+        connection.state = ConnectionState::Waiting;
+        assert!(!connection.report(None, now));
+        assert!(!connection.retry("reporter timed out".into(), deadline));
+        assert!(connection.retry("guest stream closed".into(), deadline));
+        assert!(connection.report(Some(Reading::Memory(0)), now));
+        assert_eq!(connection.last_error, None);
+        assert_eq!(
+            connection.value(now, Duration::from_secs(5)),
+            Some(Reading::Memory(0))
+        );
+        assert!(!connection.report(Some(Reading::Memory(100)), now));
+        // A new failure after a real recovery deserves a new diagnostic.
+        assert!(connection.retry("guest stream closed".into(), deadline));
+    }
+
+    #[test]
+    fn stale_data_is_derived_and_warmup_has_no_measurement() {
+        let now = Instant::now();
+        let stale = Duration::from_secs(5);
+        let mut connection = Connection::new();
+        assert!(!connection.report(Some(Reading::Network(0.0, 0.0)), now));
+        assert_eq!(
+            connection.value(now + stale, stale),
+            Some(Reading::Network(0.0, 0.0))
+        );
+        assert_eq!(
+            connection.value(now + stale + Duration::from_nanos(1), stale),
+            None
+        );
+        assert!(!connection.report(None, now + stale));
+        assert_eq!(connection.state, ConnectionState::Waiting);
+        assert_eq!(connection.value(now + stale, stale), None);
+    }
 
     fn spawn_process(script: &str) -> Process {
         Process(
@@ -291,6 +449,7 @@ mod tests {
     }
     fn spec(script: &str) -> CommandSpec {
         CommandSpec {
+            source: "test RAM".into(),
             program: "python3".into(),
             args: vec!["-u".into(), "-c".into(), script.into()],
         }
@@ -317,9 +476,39 @@ mod tests {
         )
         .unwrap();
         await_value(&reader, Reading::Memory(600));
+        assert!(matches!(
+            reader.connection.lock().unwrap().state,
+            ConnectionState::Reporting { .. }
+        ));
         let start = Instant::now();
+        reader.stop();
+        assert_eq!(reader.value(), None);
         drop(reader);
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+    #[test]
+    fn unexpected_eof_records_retry_reason_and_deadline() {
+        let reader = Reader::spawn(
+            spec("pass"),
+            Kind::Memory(23),
+            Timing {
+                retry: Duration::from_secs(2),
+                ..timing()
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = reader.connection.lock().unwrap().state.clone();
+            if let ConnectionState::Retrying { reason, retry_at } = state {
+                assert_eq!(reason, "guest stream closed");
+                assert!(retry_at > Instant::now());
+                assert_eq!(reader.value(), None);
+                break;
+            }
+            assert!(Instant::now() < deadline, "EOF did not enter retry state");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
     #[test]
     fn stale_readings_and_reconnection() {
@@ -365,5 +554,10 @@ mod tests {
         assert!(cmd.args.iter().any(|s| s == "--no-autostart"));
         assert!(cmd.args.iter().any(|s| s == "--no-gui"));
         assert!(cmd.args.last().unwrap().contains("xenstore-read"));
+        assert_eq!(cmd.source, "dev RAM");
+        assert_eq!(
+            CommandSpec::qube("sys-net", Kind::Network).source,
+            "sys-net network"
+        );
     }
 }

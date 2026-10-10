@@ -429,6 +429,7 @@ mod tests {
         pool.factory = |d| {
             Reader::spawn(
                 CommandSpec {
+                    source: "test RAM".into(),
                     program: "python3".into(),
                     args: vec![
                         "-u".into(),

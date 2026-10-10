@@ -81,7 +81,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.3-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.4-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -235,5 +235,30 @@ in Properties. Test a download/upload in an app qube and compare with the physic
 interface counters inside sys-net. Stop/restart sys-net to check recovery. Real
 qrexec traffic still needs testing on the target dom0; automated tests cover the
 stream reader with local child processes, protocol validation and guest NIC selection.
+
+## Connection diagnostics
+
+Each guest reader has three states: waiting for usable data, reporting with a
+receive timestamp, and retrying with a reason and retry deadline. Staleness is
+calculated from the timestamp; stopping a reader is an internal lifecycle action.
+The panel's snapshot format and red/grey unavailable-data rendering are unchanged.
+
+Diagnostics go to the collector's standard error, captured by systemd in dom0:
+
+```bash
+sudo journalctl -u multiload-qubes-collector -n 50 --no-pager
+sudo journalctl -fu multiload-qubes-collector
+```
+
+Messages identify the source, for example `dev RAM` or `sys-net network`. The
+first failure and any changed reason are logged. An identical failure is not
+repeated on each reconnect attempt, even if the new connection warms up first.
+The first usable measurement after failure logs recovery once. Normal reader
+shutdown is not treated as a failure. Idle zero measurements are valid data.
+
+Reasons cover launch/I/O failures, closed streams, timeouts and invalid reports.
+Raw guest stderr is still suppressed; a closed-stream diagnostic does not include
+an underlying shell/qrexec error message. No guest-provided text is forwarded to
+the journal.
 
 Out of scope: disk charts, per-qube UI, a separate tray frontend, and themes.

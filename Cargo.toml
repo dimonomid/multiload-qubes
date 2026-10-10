@@ -1,6 +1,6 @@
 [package]
 name = "multiload-qubes"
-version = "0.4.3"
+version = "0.4.4"
 autobins = false
 edition = "2021"
 license = "GPL-2.0-or-later"
