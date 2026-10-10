@@ -63,6 +63,12 @@ sudo dnf install rpm-build systemd-rpm-macros
 make rpm
 ```
 
+To put temporary RPM build files on a separate filesystem:
+
+```bash
+make rpm RPM_BUILD_DIR=/tmp/multiload-qubes-rpm-build
+```
+
 RPMs and a source RPM are written under `build/rpm/`. The source RPM bundles
 Cargo dependencies and builds offline; the initial development checkout needs
 `cargo fetch --locked` once before the offline Make targets. **Build against your dom0
@@ -75,7 +81,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.4.2-1*.rpm
+sudo dnf install ./multiload-qubes-0.4.3-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -98,9 +104,13 @@ For a staged install without touching the system: `make install DESTDIR=/tmp/mq-
 The dom0 collector is a compiled **Rust executable**. It reads native Xen
 statistics through libxenstat and domain identities through libxenstore. Opaque
 handles avoid copying Xen-version-specific C structures into Rust. The installed
-libxenstat is loaded from system library directories and its required API symbols
-are checked before use; the binary is not linked to the build machine's versioned
-libxenstat soname. Runtime Xen libraries come from `xen-libs`; building needs
+libxenstat is loaded from system library directories using `libloading`. Version
+symlinks are deduplicated, each candidate must expose the complete required API,
+and an unloadable/incomplete candidate is skipped in favor of the next one.
+Failures include candidate paths, loader details and missing symbol names. The
+private function table owns the library until native cleanup completes. C signatures
+remain an audited FFI contract; symbol presence cannot prove ABI compatibility.
+The binary is not linked to the build machine’s versioned libxenstat soname. Runtime Xen libraries come from `xen-libs`; building needs
 `xen-devel` for the XenStore linker library. Live access still needs testing in dom0.
 
 Only the collector service has Xen privileges; the GUI never runs as root. Rust

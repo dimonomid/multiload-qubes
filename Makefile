@@ -2,6 +2,7 @@ PREFIX ?= /usr
 LIBDIR ?= $(PREFIX)/lib64
 LIBEXECDIR ?= $(PREFIX)/libexec
 UNITDIR ?= $(PREFIX)/lib/systemd/system
+RPM_BUILD_DIR ?= $(CURDIR)/build/rpm/BUILD
 CC ?= cc
 CARGO ?= cargo
 PKGS = gtk+-3.0 libxfce4panel-2.0
@@ -49,9 +50,9 @@ install: all
 rpm:
 	mkdir -p build/rpm/SOURCES
 	$(CARGO) vendor --offline --locked build/vendor > /dev/null
-	tar -czf build/rpm/SOURCES/multiload-qubes-0.4.2-vendor.tar.gz -C build vendor
-	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.4.2,' -czf build/rpm/SOURCES/multiload-qubes-0.4.2.tar.gz .
-	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' packaging/multiload-qubes.spec
+	tar -czf build/rpm/SOURCES/multiload-qubes-0.4.3-vendor.tar.gz -C build vendor
+	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.4.3,' -czf build/rpm/SOURCES/multiload-qubes-0.4.3.tar.gz .
+	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' --define '_builddir $(RPM_BUILD_DIR)' packaging/multiload-qubes.spec
 
 clean:
 	$(CARGO) clean

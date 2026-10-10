@@ -1,14 +1,11 @@
 //! Opaque libxenstat/XenStore handles: no Xen-version-specific struct layouts.
 use super::{Domain, Host};
-use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CStr, CString};
+use libloading::os::unix::{Library as UnixLibrary, RTLD_LOCAL, RTLD_NOW};
+use libloading::Library;
+use std::ffi::{c_char, c_uint, c_ulong, c_ulonglong, c_void, CStr, CString};
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
-#[link(name = "dl")]
-extern "C" {
-    fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> c_int;
-}
 #[link(name = "xenstore")]
 extern "C" {
     fn xs_open(flags: c_ulong) -> *mut c_void;
@@ -22,65 +19,46 @@ extern "C" {
     fn free(ptr: *mut c_void);
 }
 
-struct Library(NonNull<c_void>);
-impl Drop for Library {
-    fn drop(&mut self) {
-        unsafe {
-            dlclose(self.0.as_ptr());
-        }
-    }
-}
-impl Library {
-    fn open() -> Result<Self, String> {
-        let mut candidates = Vec::new();
-        // Runtime library sonames carry the Xen version. Resolve the installed
-        // library's stable opaque API rather than linking to the build host's version.
-        for dir in ["/usr/lib64", "/usr/lib", "/lib64", "/lib"] {
-            let Ok(entries) = std::fs::read_dir(dir) else {
+const LIBRARY_DIRS: [&str; 4] = ["/usr/lib64", "/usr/lib", "/lib64", "/lib"];
+
+fn candidates(directories: &[&Path]) -> Vec<PathBuf> {
+    let mut paths = std::collections::BTreeSet::new();
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(version) = name.strip_prefix("libxenstat.so.") else {
                 continue;
             };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("libxenstat.so.")
-                    && name[14..].bytes().all(|b| b.is_ascii_digit() || b == b'.')
-                {
-                    candidates.push(entry.path());
-                }
+            if !version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            {
+                continue;
             }
+            let path = entry.path();
+            // Deduplicate /lib aliases and version symlinks. Preserve broken
+            // paths so loading errors can explain missing files/dependencies.
+            paths.insert(std::fs::canonicalize(&path).unwrap_or(path));
         }
-        candidates.sort();
-        candidates.dedup();
-        for path in candidates {
-            let path = CString::new(path.as_os_str().as_encoded_bytes())
-                .map_err(|_| "invalid library path")?;
-            // RTLD_NOW | RTLD_LOCAL. Only system-owned library directories above.
-            if let Some(ptr) = NonNull::new(unsafe { dlopen(path.as_ptr(), 2) }) {
-                return Ok(Self(ptr));
-            }
-        }
-        Err("cannot load libxenstat; install xen-libs in dom0".into())
     }
-    unsafe fn symbol<T: Copy>(&self, name: &str) -> Result<T, String> {
-        let name = CString::new(name).map_err(|_| "invalid symbol")?;
-        let ptr = dlsym(self.0.as_ptr(), name.as_ptr());
-        if ptr.is_null() {
-            return Err(format!("missing Xen API {}", name.to_string_lossy()));
-        }
-        // Callers supply the exact function signatures from xenstat.h. POSIX
-        // specifies dlsym conversion to a function pointer; sizes match on Linux.
-        assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<*mut c_void>());
-        Ok(std::mem::transmute_copy(&ptr))
-    }
+    paths.into_iter().collect()
 }
 
+// Function signatures match the public Xen xenstat.h API. Quantities are
+// unsigned long long (bytes or nanoseconds); handles and nodes remain opaque.
+// These pointers never leave Api/Node/Xen. Api owns the library, and Node borrows
+// Api, so the library stays loaded through every call and native-resource Drop.
 type Init = unsafe extern "C" fn() -> *mut c_void;
 type Release = unsafe extern "C" fn(*mut c_void);
 type GetNode = unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void;
 type Count = unsafe extern "C" fn(*mut c_void) -> c_uint;
-type Quantity = unsafe extern "C" fn(*mut c_void) -> u64;
+type Quantity = unsafe extern "C" fn(*mut c_void) -> c_ulonglong;
 type ByIndex = unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void;
-type Name = unsafe extern "C" fn(*mut c_void) -> *const c_char;
+type Name = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
 
 struct Api {
     init: Init,
@@ -99,26 +77,71 @@ struct Api {
     paused: Count,
     shutdown: Count,
     dying: Count,
+    _library: Library,
 }
 impl Api {
-    unsafe fn load(lib: &Library) -> Result<Self, String> {
+    fn open() -> Result<Self, String> {
+        let directories: Vec<_> = LIBRARY_DIRS.iter().map(Path::new).collect();
+        let paths = candidates(&directories);
+        if paths.is_empty() {
+            return Err(format!(
+                "no versioned libxenstat found in {}; install xen-libs in dom0",
+                LIBRARY_DIRS.join(", ")
+            ));
+        }
+        // System-owned directories supply the trusted Xen implementations.
+        unsafe { Self::open_candidates(&paths) }
+    }
+
+    /// Candidates must be trusted native code. Any Xen symbols they provide must
+    /// match the public xenstat.h ABI; missing symbols are rejected before use.
+    unsafe fn open_candidates(paths: &[PathBuf]) -> Result<Self, String> {
+        let mut errors = Vec::new();
+        for path in paths {
+            // Resolve dependencies immediately and keep symbols local, as before.
+            let result = UnixLibrary::open(Some(path), RTLD_NOW | RTLD_LOCAL)
+                .map_err(|e| e.to_string())
+                .and_then(|library| Self::load(library.into()));
+            match result {
+                Ok(api) => return Ok(api),
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
+            }
+        }
+        Err(format!(
+            "no compatible libxenstat could be loaded:\n{}",
+            errors.join("\n")
+        ))
+    }
+
+    /// Any present Xen symbols must match the public C ABI. Missing symbols are
+    /// rejected; as with all FFI, C signatures cannot be checked at runtime.
+    unsafe fn load(library: Library) -> Result<Self, String> {
+        macro_rules! symbol {
+            ($name:literal, $signature:ty) => {
+                library
+                    .get::<$signature>(concat!($name, "\0").as_bytes())
+                    .map(|symbol| *symbol)
+                    .map_err(|error| format!("{}: {error}", $name))?
+            };
+        }
         Ok(Self {
-            init: lib.symbol("xenstat_init")?,
-            uninit: lib.symbol("xenstat_uninit")?,
-            get_node: lib.symbol("xenstat_get_node")?,
-            free_node: lib.symbol("xenstat_free_node")?,
-            total: lib.symbol("xenstat_node_tot_mem")?,
-            free: lib.symbol("xenstat_node_free_mem")?,
-            cpus: lib.symbol("xenstat_node_num_cpus")?,
-            count: lib.symbol("xenstat_node_num_domains")?,
-            domain: lib.symbol("xenstat_node_domain_by_index")?,
-            id: lib.symbol("xenstat_domain_id")?,
-            name: lib.symbol("xenstat_domain_name")?,
-            cpu: lib.symbol("xenstat_domain_cpu_ns")?,
-            memory: lib.symbol("xenstat_domain_cur_mem")?,
-            paused: lib.symbol("xenstat_domain_paused")?,
-            shutdown: lib.symbol("xenstat_domain_shutdown")?,
-            dying: lib.symbol("xenstat_domain_dying")?,
+            init: symbol!("xenstat_init", Init),
+            uninit: symbol!("xenstat_uninit", Release),
+            get_node: symbol!("xenstat_get_node", GetNode),
+            free_node: symbol!("xenstat_free_node", Release),
+            total: symbol!("xenstat_node_tot_mem", Quantity),
+            free: symbol!("xenstat_node_free_mem", Quantity),
+            cpus: symbol!("xenstat_node_num_cpus", Count),
+            count: symbol!("xenstat_node_num_domains", Count),
+            domain: symbol!("xenstat_node_domain_by_index", ByIndex),
+            id: symbol!("xenstat_domain_id", Count),
+            name: symbol!("xenstat_domain_name", Name),
+            cpu: symbol!("xenstat_domain_cpu_ns", Quantity),
+            memory: symbol!("xenstat_domain_cur_mem", Quantity),
+            paused: symbol!("xenstat_domain_paused", Count),
+            shutdown: symbol!("xenstat_domain_shutdown", Count),
+            dying: symbol!("xenstat_domain_dying", Count),
+            _library: library,
         })
     }
 }
@@ -127,7 +150,6 @@ pub struct Xen {
     api: Api,
     handle: NonNull<c_void>,
     xs: NonNull<c_void>,
-    _library: Library,
 }
 impl Drop for Xen {
     fn drop(&mut self) {
@@ -151,8 +173,7 @@ impl Drop for Node<'_> {
 
 impl Xen {
     pub fn open() -> Result<Self, String> {
-        let library = Library::open()?;
-        let api = unsafe { Api::load(&library)? };
+        let api = Api::open()?;
         let handle =
             NonNull::new(unsafe { (api.init)() }).ok_or("Xen access requires dom0 privileges")?;
         let Some(xs) = NonNull::new(unsafe { xs_open(0) }) else {
@@ -161,12 +182,7 @@ impl Xen {
             }
             return Err("cannot open XenStore in dom0".into());
         };
-        Ok(Self {
-            api,
-            handle,
-            xs,
-            _library: library,
-        })
+        Ok(Self { api, handle, xs })
     }
     fn read(&self, path: &str) -> Option<String> {
         let path = CString::new(path).ok()?;
@@ -254,12 +270,154 @@ impl Xen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn resolves_native_api_without_opening_privileged_handles() {
-        let lib = Library::open().unwrap();
-        unsafe {
-            Api::load(&lib).unwrap();
-            assert!(lib.symbol::<Init>("not_a_real_xen_function").is_err());
+    use std::io::Write;
+    use std::os::unix::fs::symlink;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "mq-xen-loader-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
         }
+        fn library(&self, name: &str, missing: Option<&str>) -> PathBuf {
+            // Definitions compile against the actual public header, not copied C
+            // structs. An unload marker verifies ownership on failure and success.
+            let marker = self.0.join(format!("{name}.unloaded"));
+            let mut source = format!("#include <xenstat.h>\n#include <stdio.h>\n#include <stdint.h>\nstatic unsigned freed;\n__attribute__((destructor)) static void unloaded(void) {{ FILE *f=fopen({marker:?},\"w\"); if(f) fclose(f); }}\nunsigned test_freed(void) {{ return freed; }}\n");
+            for (symbol, definition) in [
+                ("xenstat_init", "xenstat_handle *xenstat_init(void) { return (xenstat_handle *)(uintptr_t)1; }"),
+                ("xenstat_uninit", "void xenstat_uninit(xenstat_handle *h) {}"),
+                ("xenstat_get_node", "xenstat_node *xenstat_get_node(xenstat_handle *h, unsigned int flags) { return (xenstat_node *)(uintptr_t)2; }"),
+                ("xenstat_free_node", "void xenstat_free_node(xenstat_node *n) { freed++; }"),
+                ("xenstat_node_tot_mem", "unsigned long long xenstat_node_tot_mem(xenstat_node *n) { return 4194304ULL; }"),
+                ("xenstat_node_free_mem", "unsigned long long xenstat_node_free_mem(xenstat_node *n) { return 1048576ULL; }"),
+                ("xenstat_node_num_cpus", "unsigned xenstat_node_num_cpus(xenstat_node *n) { return 8; }"),
+                ("xenstat_node_num_domains", "unsigned xenstat_node_num_domains(xenstat_node *n) { return 1; }"),
+                ("xenstat_node_domain_by_index", "xenstat_domain *xenstat_node_domain_by_index(xenstat_node *n, unsigned index) { return (xenstat_domain *)(uintptr_t)3; }"),
+                ("xenstat_domain_id", "unsigned xenstat_domain_id(xenstat_domain *d) { return 23; }"),
+                ("xenstat_domain_name", "char *xenstat_domain_name(xenstat_domain *d) { static char name[]=\"dev\"; return name; }"),
+                ("xenstat_domain_cpu_ns", "unsigned long long xenstat_domain_cpu_ns(xenstat_domain *d) { return 1234567890123ULL; }"),
+                ("xenstat_domain_cur_mem", "unsigned long long xenstat_domain_cur_mem(xenstat_domain *d) { return 2097152ULL; }"),
+                ("xenstat_domain_paused", "unsigned xenstat_domain_paused(xenstat_domain *d) { return 0; }"),
+                ("xenstat_domain_shutdown", "unsigned xenstat_domain_shutdown(xenstat_domain *d) { return 0; }"),
+                ("xenstat_domain_dying", "unsigned xenstat_domain_dying(xenstat_domain *d) { return 0; }"),
+            ] {
+                if missing != Some(symbol) { source.push_str(definition); source.push('\n'); }
+            }
+            let path = self.0.join(name);
+            let mut compiler = Command::new("cc")
+                .args(["-shared", "-fPIC", "-x", "c", "-", "-o"])
+                .arg(&path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            compiler
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(source.as_bytes())
+                .unwrap();
+            let output = compiler.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            path
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn resolves_installed_api_without_opening_privileged_handles() {
+        Api::open().unwrap();
+    }
+
+    #[test]
+    fn fallback_releases_incomplete_libraries_and_keeps_selected_api_alive() {
+        let fixture = Fixture::new();
+        let corrupt = fixture.0.join("corrupt.so");
+        std::fs::write(&corrupt, "not a shared library").unwrap();
+        let incomplete = fixture.library("incomplete.so", Some("xenstat_domain_dying"));
+        let good = fixture.library("good.so", None);
+        // The fixtures and signatures above implement the trusted xenstat.h ABI.
+        let api = unsafe { Api::open_candidates(&[corrupt, incomplete, good]) }.unwrap();
+        assert!(fixture.0.join("incomplete.so.unloaded").exists());
+        assert!(!fixture.0.join("good.so.unloaded").exists());
+        unsafe {
+            assert_eq!((api.total)(std::ptr::null_mut()), 4194304);
+            assert_eq!((api.cpus)(std::ptr::null_mut()), 8);
+            let handle = (api.init)();
+            let node = Node {
+                ptr: NonNull::new((api.get_node)(handle, 0)).unwrap(),
+                api: &api,
+            };
+            let domain = (api.domain)(node.ptr.as_ptr(), 0);
+            assert_eq!((api.id)(domain), 23);
+            assert_eq!((api.cpu)(domain), 1234567890123);
+            assert_eq!(CStr::from_ptr((api.name)(domain)).to_str().unwrap(), "dev");
+            drop(node);
+            let freed = api
+                ._library
+                .get::<unsafe extern "C" fn() -> c_uint>(b"test_freed\0")
+                .unwrap();
+            assert_eq!(freed(), 1);
+            (api.uninit)(handle);
+        }
+        drop(api);
+        assert!(fixture.0.join("good.so.unloaded").exists());
+    }
+
+    #[test]
+    fn errors_identify_paths_and_missing_symbols() {
+        let fixture = Fixture::new();
+        let corrupt = fixture.0.join("corrupt.so");
+        std::fs::write(&corrupt, "not ELF").unwrap();
+        let missing = fixture.library("missing.so", Some("xenstat_domain_dying"));
+        let absent = fixture.0.join("absent.so");
+        let error =
+            unsafe { Api::open_candidates(&[absent.clone(), corrupt.clone(), missing.clone()]) }
+                .err()
+                .unwrap();
+        assert!(error.contains(absent.to_str().unwrap()));
+        assert!(error.contains(corrupt.to_str().unwrap()));
+        assert!(error.contains(missing.to_str().unwrap()));
+        assert!(error.contains("xenstat_domain_dying"));
+        assert!(error.contains("no compatible libxenstat"));
+        assert!(fixture.0.join("missing.so.unloaded").exists());
+    }
+
+    #[test]
+    fn discovery_filters_and_deduplicates_version_symlinks() {
+        let fixture = Fixture::new();
+        let actual = fixture.library("libxenstat.so.4.20.0", None);
+        symlink(&actual, fixture.0.join("libxenstat.so.4.20")).unwrap();
+        for name in [
+            "libxenstat.so",
+            "libxenstat.so.4.debug",
+            "libxenstat.so.",
+            "libxenstat.so.4..20",
+        ] {
+            std::fs::write(fixture.0.join(name), "ignored").unwrap();
+        }
+        assert_eq!(
+            candidates(&[fixture.0.as_path(), fixture.0.as_path()]),
+            vec![actual]
+        );
+        assert!(candidates(&[&fixture.0.join("absent")]).is_empty());
     }
 }
