@@ -47,7 +47,7 @@ install: all
 
 rpm:
 	mkdir -p build/rpm/SOURCES
-	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.1.0,' -czf build/rpm/SOURCES/multiload-qubes-0.1.0.tar.gz .
+	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.2.0,' -czf build/rpm/SOURCES/multiload-qubes-0.2.0.tar.gz .
 	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' packaging/multiload-qubes.spec
 
 clean:

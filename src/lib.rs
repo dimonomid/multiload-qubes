@@ -13,6 +13,7 @@ pub struct Sample {
     pub used: u64,
     pub unknown: u64,
     pub overhead: u64,
+    pub network: Option<(f64, f64)>,
 }
 
 impl Sample {
@@ -22,7 +23,7 @@ impl Sample {
             return None;
         }
         let p: Vec<_> = text.split_whitespace().collect();
-        if p.len() != 9 || p[0] != "MQ1" {
+        if !((p.len() == 9 && p[0] == "MQ1") || (p.len() == 11 && p[0] == "MQ2")) {
             return None;
         }
         let timestamp: f64 = p[1].parse().ok()?;
@@ -35,9 +36,24 @@ impl Sample {
             }
             Some(v)
         };
+        let network = if p[0] == "MQ1" || (p[9] == "unknown" && p[10] == "unknown") {
+            None
+        } else {
+            let rx: f64 = p[9].parse().ok()?;
+            let tx: f64 = p[10].parse().ok()?;
+            if !rx.is_finite()
+                || !tx.is_finite()
+                || !(0.0..=1e15).contains(&rx)
+                || !(0.0..=1e15).contains(&tx)
+            {
+                return None;
+            }
+            Some((rx, tx))
+        };
         let s = Self {
             timestamp,
             cpu,
+            network,
             total: p[3].parse().ok()?,
             allocated: p[4].parse().ok()?,
             used: p[5].parse().ok()?,
@@ -93,6 +109,10 @@ impl Graphs {
                 used: ((10.0 + t.cos() * 3.0) * 1048576.0) as u64,
                 unknown: 4 * 1048576,
                 overhead: 256 * 1024,
+                network: Some((
+                    (1.0 + t.sin()) * 800000.0,
+                    (1.0 + (t * 1.7).cos()) * 200000.0,
+                )),
             })
         } else {
             fs::read_to_string("/run/multiload-qubes/metrics")
@@ -103,10 +123,18 @@ impl Graphs {
         let text = if let Some(s) = &sample {
             let cpu = s.cpu.map_or("warming up".into(), |v| format!("{v:.1}%"));
             let gib = |n: u64| n as f64 / 1048576.0;
-            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM reflects guest reports; updates may be thresholded.",
+            let network = match s.network {
+                Some((rx, tx)) => format!(
+                    "\nNetwork in: {}\nNetwork out: {}",
+                    rate_text(rx),
+                    rate_text(tx)
+                ),
+                None => "\nNetwork: unavailable or warming up".into(),
+            };
+            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM reflects guest reports; updates may be thresholded.{}",
                 if demo { "DEMO — simulated data\n" } else { "" }, cpu, gib(s.used),
                 gib(s.unknown), gib(s.allocated - s.unknown - s.used),
-                gib(s.allocated), gib(s.total), gib(s.overhead))
+                gib(s.allocated), gib(s.total), gib(s.overhead), network)
         } else {
             "Metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0.\nNo allocated memory is substituted for actual usage.".into()
         };
@@ -115,6 +143,14 @@ impl Graphs {
         while self.history.len() > 2048 {
             self.history.pop_front();
         }
+    }
+}
+
+fn rate_text(bytes: f64) -> String {
+    if bytes >= 1048576.0 {
+        format!("{:.2} MiB/s", bytes / 1048576.0)
+    } else {
+        format!("{:.1} KiB/s", bytes / 1024.0)
     }
 }
 
@@ -142,12 +178,23 @@ unsafe fn rect(cr: *mut c_void, color: u32, x: f64, y: f64, w: f64, h: f64) {
 }
 
 impl Graphs {
-    unsafe fn chart(&self, cr: *mut c_void, width: i32, height: i32, memory: bool) {
+    fn network_scale(&self, columns: usize) -> f64 {
+        let peak = self
+            .history
+            .iter()
+            .rev()
+            .take(columns)
+            .filter_map(|s| s.as_ref()?.network)
+            .map(|(rx, tx)| rx + tx)
+            .fold(1024.0, f64::max);
+        2f64.powf(peak.log2().ceil())
+    }
+    unsafe fn chart(&self, cr: *mut c_void, width: i32, height: i32, kind: i32) {
         let (w, h) = (width as f64, height as f64);
-        let (border, top) = if memory {
-            (0x008042, 0x13261D)
-        } else {
-            (0x005D80, 0x132126)
+        let (border, top) = match kind {
+            1 => (0x008042, 0x13261D),
+            2 => (0x807100, 0x262413),
+            _ => (0x005D80, 0x132126),
         };
         rect(cr, border, 0.0, 0.0, w, h);
         for y in 1..height - 1 {
@@ -158,10 +205,11 @@ impl Graphs {
             rect(cr, c, 1.0, y as f64, w - 2.0, 1.0);
         }
         let n = self.history.len().min((width - 2) as usize);
+        let net_scale = self.network_scale(n);
         for (i, sample) in self.history.iter().skip(self.history.len() - n).enumerate() {
             let x = w - 1.0 - n as f64 + i as f64;
             if let Some(s) = sample {
-                if memory {
+                if kind == 1 {
                     let used = s.used as f64 / s.total as f64 * (h - 2.0);
                     let allocated = s.allocated as f64 / s.total as f64 * (h - 2.0);
                     let unknown = s.unknown as f64 / s.total as f64 * (h - 2.0);
@@ -171,6 +219,22 @@ impl Graphs {
                         rect(cr, 0xD14343, x, h - 1.0 - allocated, 1.0, unknown);
                     }
                     rect(cr, 0x03964F, x, h - 1.0 - used, 1.0, used);
+                } else if kind == 2 {
+                    if let Some((rx, tx)) = s.network {
+                        let incoming = rx / net_scale * (h - 2.0);
+                        let outgoing = tx / net_scale * (h - 2.0);
+                        rect(cr, 0xE2CC05, x, h - 1.0 - incoming, 1.0, incoming);
+                        rect(
+                            cr,
+                            0x696018,
+                            x,
+                            h - 1.0 - incoming - outgoing,
+                            1.0,
+                            outgoing,
+                        );
+                    } else {
+                        rect(cr, 0x777777, x, h - 3.0, 1.0, 2.0);
+                    }
                 } else if let Some(cpu) = s.cpu {
                     let v = cpu / 100.0 * (h - 2.0);
                     rect(cr, 0x036F96, x, h - 1.0 - v, 1.0, v);
@@ -213,6 +277,7 @@ pub unsafe extern "C" fn mq_tooltip(g: *const Graphs) -> *const c_char {
 /// # Safety
 /// `g` and `cr` must be live on the GTK thread. Cairo context is borrowed only.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)] // Fixed C ABI for the panel adapter.
 pub unsafe extern "C" fn mq_draw(
     g: *const Graphs,
     cr: *mut c_void,
@@ -220,6 +285,7 @@ pub unsafe extern "C" fn mq_draw(
     height: i32,
     cpu: i32,
     ram: i32,
+    network: i32,
     vertical: i32,
 ) {
     let Some(g) = g.as_ref() else {
@@ -228,7 +294,7 @@ pub unsafe extern "C" fn mq_draw(
     if cr.is_null() || width < 4 || height < 4 {
         return;
     }
-    let count = (cpu != 0) as i32 + (ram != 0) as i32;
+    let count = (cpu != 0) as i32 + (ram != 0) as i32 + (network != 0) as i32;
     if count == 0 {
         return;
     }
@@ -243,18 +309,20 @@ pub unsafe extern "C" fn mq_draw(
     cairo_save(cr);
     cairo_rectangle(cr, 0.0, 0.0, width as f64, height as f64);
     cairo_clip(cr);
-    if cpu != 0 {
-        g.chart(cr, cw, ch, false);
-    }
-    if ram != 0 {
-        if cpu != 0 {
+    let mut index = 0;
+    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2)] {
+        if enabled == 0 {
+            continue;
+        }
+        if index > 0 {
             cairo_translate(
                 cr,
                 if vertical == 0 { cw as f64 } else { 0.0 },
                 if vertical != 0 { ch as f64 } else { 0.0 },
             );
         }
-        g.chart(cr, cw, ch, true);
+        g.chart(cr, cw, ch, kind);
+        index += 1;
     }
     cairo_restore(cr);
 }
@@ -272,6 +340,32 @@ mod tests {
     #[test]
     fn accepts_valid_snapshot() {
         assert!(Sample::parse(&line("42.5", "32000 24000 10000 2000 1000")).is_some());
+    }
+    #[test]
+    fn network_protocol_and_validation() {
+        let base = line("10", "32 24 10 0 1").replacen("MQ1", "MQ2", 1);
+        let s = Sample::parse(&format!("{base} 1024 2048")).unwrap();
+        assert_eq!(s.network, Some((1024.0, 2048.0)));
+        assert!(Sample::parse(&format!("{base} unknown unknown"))
+            .unwrap()
+            .network
+            .is_none());
+        for values in ["NaN 0", "-1 0", "0 inf", "unknown 0", "1e16 0"] {
+            assert!(Sample::parse(&format!("{base} {values}")).is_none());
+        }
+    }
+    #[test]
+    fn network_scale_covers_combined_rates_and_expires_old_peaks() {
+        let mut graphs = Graphs::new();
+        graphs.update(true);
+        let mut sample = graphs.history.back().unwrap().clone().unwrap();
+        graphs.history.clear();
+        sample.network = Some((4096.0, 4096.0));
+        graphs.history.push_back(Some(sample.clone()));
+        assert_eq!(graphs.network_scale(2), 8192.0);
+        sample.network = Some((0.0, 0.0));
+        graphs.history.push_back(Some(sample));
+        assert_eq!(graphs.network_scale(1), 1024.0);
     }
     #[test]
     fn rejects_impossible_or_nonfinite_values() {

@@ -10,7 +10,7 @@ extern Graphs *mq_new(void);
 extern void mq_free(Graphs *);
 extern void mq_tick(Graphs *, int);
 extern const char *mq_tooltip(const Graphs *);
-extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int);
+extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int, int);
 
 typedef struct {
     XfcePanelPlugin *plugin;
@@ -18,18 +18,18 @@ typedef struct {
     Graphs *graphs;
     guint timer;
     int width, interval;
-    gboolean cpu, ram, demo, vertical;
+    gboolean cpu, ram, network, demo, vertical;
 } Plugin;
 
 typedef struct {
     Plugin *owner;
-    GtkWidget *width, *interval, *cpu, *ram;
+    GtkWidget *width, *interval, *cpu, *ram, *network;
 } Settings;
 
 static void resize(Plugin *p) {
     int size = p->plugin ? xfce_panel_plugin_get_size(p->plugin) : 48;
     int width = p->width ? p->width : size;
-    int count = p->cpu + p->ram;
+    int count = p->cpu + p->ram + p->network;
     gtk_widget_set_size_request(p->area, p->vertical ? size : width * count,
                                p->vertical ? width * count : size);
 }
@@ -47,7 +47,7 @@ static void restart_timer(Plugin *p) {
 static gboolean draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
     Plugin *p = data;
     mq_draw(p->graphs, cr, gtk_widget_get_allocated_width(widget),
-            gtk_widget_get_allocated_height(widget), p->cpu, p->ram, p->vertical);
+            gtk_widget_get_allocated_height(widget), p->cpu, p->ram, p->network, p->vertical);
     return FALSE;
 }
 static void save(XfcePanelPlugin *plugin, Plugin *p) {
@@ -58,6 +58,7 @@ static void save(XfcePanelPlugin *plugin, Plugin *p) {
     g_key_file_set_integer(key, "Graphs", "interval_ms", p->interval);
     g_key_file_set_boolean(key, "Graphs", "cpu", p->cpu);
     g_key_file_set_boolean(key, "Graphs", "ram", p->ram);
+    g_key_file_set_boolean(key, "Graphs", "network", p->network);
     GError *error = NULL;
     if (!g_key_file_save_to_file(key, path, &error)) {
         g_warning("Cannot save Multiload settings: %s", error->message);
@@ -76,7 +77,8 @@ static void load(Plugin *p) {
         p->interval = CLAMP(g_key_file_get_integer(key, "Graphs", "interval_ms", NULL), 250, 10000);
         p->cpu = g_key_file_get_boolean(key, "Graphs", "cpu", NULL);
         p->ram = g_key_file_get_boolean(key, "Graphs", "ram", NULL);
-        if (!p->cpu && !p->ram) p->cpu = p->ram = TRUE;
+        p->network = !g_key_file_has_key(key, "Graphs", "network", NULL) || g_key_file_get_boolean(key, "Graphs", "network", NULL);
+        if (!p->cpu && !p->ram && !p->network) p->cpu = p->ram = TRUE;
     }
     g_key_file_unref(key);
     g_free(path);
@@ -112,7 +114,8 @@ static void settings_response(GtkDialog *dialog, gint response, Settings *s) {
         p->interval = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(s->interval));
         p->cpu = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->cpu));
         p->ram = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->ram));
-        if (!p->cpu && !p->ram) p->cpu = p->ram = TRUE;
+        p->network = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->network));
+        if (!p->cpu && !p->ram && !p->network) p->cpu = p->ram = TRUE;
         resize(p); restart_timer(p); save(p->plugin, p);
     }
     gtk_widget_destroy(GTK_WIDGET(dialog));
@@ -130,20 +133,23 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     GtkWidget *interval = gtk_spin_button_new_with_range(250, 10000, 250);
     GtkWidget *cpu = gtk_check_button_new_with_label("CPU");
     GtkWidget *ram = gtk_check_button_new_with_label("RAM");
+    GtkWidget *network = gtk_check_button_new_with_label("Network");
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(width), p->width);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(interval), p->interval);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cpu), p->cpu);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ram), p->ram);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(network), p->network);
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Chart width (0 = square)"), 0, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), width, 1, 0, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), gtk_label_new("Update interval (ms)"), 0, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), interval, 1, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), cpu, 0, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), ram, 1, 2, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown"), 0, 3, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), network, 0, 3, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown"), 0, 4, 2, 1);
     gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(p->dialog))), grid);
     Settings *s = g_new0(Settings, 1);
-    *s = (Settings){p, width, interval, cpu, ram};
+    *s = (Settings){p, width, interval, cpu, ram, network};
     g_object_set_data(G_OBJECT(p->dialog), "settings", s);
     g_signal_connect(p->dialog, "response", G_CALLBACK(settings_response), s);
     g_signal_connect(p->dialog, "destroy", G_CALLBACK(settings_closed), s);
@@ -151,13 +157,13 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.1.0",
-        "comments", "Whole-machine CPU and RAM graphs.\nPalette from multiload-ng.",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.2.0",
+        "comments", "Whole-machine CPU, RAM and network graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }
 static Plugin *create(void) {
     Plugin *p = g_new0(Plugin, 1);
-    p->cpu = p->ram = TRUE; p->interval = 1000;
+    p->cpu = p->ram = p->network = TRUE; p->interval = 1000;
     p->graphs = mq_new();
     p->area = gtk_drawing_area_new();
     gtk_widget_add_events(p->area, GDK_BUTTON_PRESS_MASK);
@@ -199,16 +205,19 @@ static int self_test(void) {
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->width), 64);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->interval), 500);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->cpu), FALSE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->network), FALSE);
     gtk_dialog_response(GTK_DIALOG(p->dialog), GTK_RESPONSE_OK);
     g_assert_null(p->dialog);
     g_assert_cmpint(p->width, ==, 64);
     g_assert_cmpint(p->interval, ==, 500);
     g_assert_false(p->cpu);
-    p->width = 0; p->interval = 1000; p->cpu = TRUE;
+    g_assert_false(p->network);
+    p->width = 0; p->interval = 1000; p->cpu = p->network = TRUE;
     load(p);
     g_assert_cmpint(p->width, ==, 64);
     g_assert_cmpint(p->interval, ==, 500);
     g_assert_false(p->cpu);
+    g_assert_false(p->network);
     orientation_changed(p->plugin, GTK_ORIENTATION_VERTICAL, p);
     g_assert_true(p->vertical);
     configure(p->plugin, p);
@@ -223,9 +232,9 @@ int main(int argc, char **argv) {
     if (argc == 3 && g_str_equal(argv[1], "--render")) {
         Graphs *graphs = mq_new();
         for (int i = 0; i < 400; i++) mq_tick(graphs, TRUE);
-        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 320, 64);
+        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 480, 64);
         cairo_t *cr = cairo_create(surface);
-        mq_draw(graphs, cr, 320, 64, TRUE, TRUE, FALSE);
+        mq_draw(graphs, cr, 480, 64, TRUE, TRUE, TRUE, FALSE);
         cairo_status_t status = cairo_surface_write_to_png(surface, argv[2]);
         cairo_destroy(cr); cairo_surface_destroy(surface); mq_free(graphs);
         return status == CAIRO_STATUS_SUCCESS ? 0 : 1;

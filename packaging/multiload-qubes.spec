@@ -1,7 +1,7 @@
 Name:           multiload-qubes
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
-Summary:        Whole-machine CPU and RAM graphs for the Qubes XFCE panel
+Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
 Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  gcc
@@ -15,10 +15,11 @@ BuildRequires:  systemd-rpm-macros
 Requires:       xfce4-panel
 Requires:       python3
 Requires:       python3-xen
+Requires:       /usr/bin/qvm-run
 %{?systemd_requires}
 
 %description
-Native XFCE panel plugin displaying scrolling CPU and memory graphs for Qubes.
+Native XFCE panel plugin displaying scrolling CPU, memory and network graphs for Qubes.
 A read-only dom0 collector publishes Xen allocation and guest-reported usage.
 
 %prep
@@ -51,5 +52,8 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.2.0-1
+- Add network chart using a persistent sys-net counter stream
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.1.0-1
 - Initial CPU and memory panel plugin

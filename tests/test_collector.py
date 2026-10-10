@@ -77,12 +77,21 @@ class FakeXs:
 
 class Integration(unittest.TestCase):
     @patch.object(c, "dom0_used", return_value=400)
+    def test_network_rates_do_not_change_xen_accounting(self, _):
+        class Network:
+            def rates(self):
+                return (1234.5, 678.25)
+        sample = c.Collector(FakeXc(), FakeXs(), Network()).sample(1).split()
+        self.assertEqual(sample[-2:], ["1234.500", "678.250"])
+        self.assertEqual(sample[3:8], ["4000", "3000", "900", "1000", "100"])
+
+    @patch.object(c, "dom0_used", return_value=400)
     def test_snapshot_accounts_for_unknown_domains(self, _):
         xs = FakeXs()
         collector = c.Collector(FakeXc(), xs)
         p = collector.sample(1).split()
-        self.assertEqual(p[0], "MQ1")
-        self.assertEqual(p[2:], ["unknown", "4000", "3000", "900", "1000", "100", "1"])
+        self.assertEqual(p[0], "MQ2")
+        self.assertEqual(p[2:], ["unknown", "4000", "3000", "900", "1000", "100", "1", "unknown", "unknown"])
         self.assertEqual(xs.ended, 2)
 
     @patch.object(c, "dom0_used", return_value=400)

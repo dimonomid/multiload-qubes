@@ -2,7 +2,7 @@
 Type=X-XFCE-PanelPlugin
 Encoding=UTF-8
 Name=Multiload for Qubes
-Comment=Whole-machine CPU and RAM history
+Comment=Whole-machine CPU, RAM and network history
 Icon=utilities-system-monitor
 X-XFCE-Module=multiload-qubes
 X-XFCE-Internal=FALSE

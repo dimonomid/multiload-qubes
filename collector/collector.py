@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Read-only Xen/Qubes collector; never executes commands inside guests.
+"""Read-only Xen/Qubes collector with a persistent sys-net counter reader.
 
 Only this service needs Xen privileges. The panel reads an atomic numeric snapshot.
 All memory quantities are KiB. Guest reports are untrusted, bounded integers.
@@ -10,6 +10,11 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import select
+import shlex
+import signal
+import subprocess
+import threading
 import time
 
 
@@ -72,9 +77,164 @@ class CpuTracker:
         return min(100.0, max(0.0, delta / 1e9 / elapsed / cpus * 100.0))
 
 
+# Executed through the existing qubes.VMShell service. No guest installation.
+NETWORK_SCRIPT = r"""
+import pathlib, time
+boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+while True:
+    rows = []
+    for dev in sorted(pathlib.Path('/sys/class/net').iterdir()):
+        if dev.name == 'lo' or dev.name.startswith('vif') or not (dev / 'device').exists():
+            continue
+        if '/virtual/' in str(dev.resolve()):
+            continue
+        try:
+            idx = int((dev / 'ifindex').read_text())
+            rx = int((dev / 'statistics/rx_bytes').read_text())
+            tx = int((dev / 'statistics/tx_bytes').read_text())
+            rows.append(f'{idx}:{rx}:{tx}')
+        except (OSError, ValueError):
+            continue
+    print('N1', time.monotonic_ns(), boot, ','.join(rows) or '-', flush=True)
+    time.sleep(1)
+"""
+
+
+def parse_network(line):
+    if len(line) > 8192:
+        raise ValueError('Oversized network sample')
+    parts = line.decode('ascii').split()
+    if len(parts) != 4 or parts[0] != 'N1':
+        raise ValueError('Invalid network sample')
+    stamp = number(parts[1])
+    boot = parts[2]
+    if stamp is None or len(boot) != 36 or any(x not in '0123456789abcdef-' for x in boot):
+        raise ValueError('Invalid network identity or timestamp')
+    counters = {}
+    if parts[3] != '-':
+        for item in parts[3].split(','):
+            fields = item.split(':')
+            if len(fields) != 3:
+                raise ValueError('Invalid network counters')
+            idx, rx, tx = map(number, fields)
+            if None in (idx, rx, tx) or idx == 0 or idx in counters or len(counters) >= 64:
+                raise ValueError('Invalid network interface')
+            counters[idx] = (rx, tx)
+    return stamp, boot, counters
+
+
+class NetworkTracker:
+    def __init__(self):
+        self.previous = None
+
+    def update(self, line):
+        current = parse_network(line)
+        previous, self.previous = self.previous, current
+        stamp, boot, counters = current
+        if previous is None or not counters:
+            return None
+        old_stamp, old_boot, old = previous
+        if boot != old_boot or counters.keys() != old.keys() or stamp <= old_stamp:
+            return None
+        elapsed = (stamp - old_stamp) / 1e9
+        if not 0.1 <= elapsed <= 5:
+            return None
+        rx = tx = 0
+        for idx, (r, t) in counters.items():
+            before_r, before_t = old[idx]
+            if r < before_r or t < before_t:
+                return None
+            rx += r - before_r
+            tx += t - before_t
+        rates = (rx / elapsed, tx / elapsed)
+        if any(v > 1e15 for v in rates):
+            raise ValueError('Implausible network rate')
+        return rates
+
+
+class NetworkReader:
+    """Nonblocking for Xen collection; bounded reads and reconnect after failure."""
+    def __init__(self, qube='sys-net'):
+        self.qube = qube
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.latest = None
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def rates(self):
+        with self.lock:
+            if self.latest is None or time.monotonic() - self.latest[0] > 5:
+                return None
+            return self.latest[1]
+
+    def close(self):
+        self.stop_event.set()
+        self.thread.join(timeout=8)
+
+    def run(self):
+        command = 'python3 -u -c ' + shlex.quote(NETWORK_SCRIPT)
+        while not self.stop_event.is_set():
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    ['qvm-run', '--pass-io', '--no-gui', '--no-autostart', self.qube, command],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, start_new_session=True)
+                tracker, buffer = NetworkTracker(), b''
+                last = time.monotonic()
+                budget, budget_time = 8.0, last
+                while not self.stop_event.is_set():
+                    if time.monotonic() - last > 5:
+                        raise TimeoutError('Network reporter stopped responding')
+                    ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+                    if not ready:
+                        continue
+                    chunk = os.read(proc.stdout.fileno(), 8193)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if len(buffer) > 8192:
+                        raise ValueError('Oversized network stream')
+                    while b'\n' in buffer:
+                        line, buffer = buffer.split(b'\n', 1)
+                        now = time.monotonic()
+                        budget = min(8.0, budget + (now - budget_time) * 4.0) - 1
+                        budget_time = now
+                        if budget < 0:
+                            raise ValueError('Network stream exceeds sample rate limit')
+                        rate = tracker.update(line)
+                        last = time.monotonic()
+                        with self.lock:
+                            self.latest = (last, rate)
+            except (OSError, ValueError, UnicodeError, TimeoutError):
+                logging.warning('Network source %s unavailable; retrying', self.qube)
+            finally:
+                with self.lock:
+                    self.latest = None
+                if proc is not None:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait()
+                    proc.stdout.close()
+            self.stop_event.wait(3)
+
+
 class Collector:
-    def __init__(self, xc, xs):
+    def __init__(self, xc, xs, network=None):
         self.xc, self.xs = xc, xs
+        self.network = network
         self.cpu = CpuTracker()
 
     def sample(self, period):
@@ -111,8 +271,10 @@ class Collector:
         free = max(0, int(host["free_memory"]))
         overhead = max(0, total - allocated - free)
         cpu_text = "unknown" if cpu is None else f"{cpu:.4f}"
-        return (f"MQ1 {time.time():.6f} {cpu_text} {total} {allocated} "
-                f"{used} {unknown} {overhead} {period}\n")
+        rates = self.network.rates() if self.network else None
+        net = "unknown unknown" if rates is None else f"{rates[0]:.3f} {rates[1]:.3f}"
+        return (f"MQ2 {time.time():.6f} {cpu_text} {total} {allocated} "
+                f"{used} {unknown} {overhead} {period} {net}\n")
 
 
 def publish(path, text):
@@ -132,7 +294,11 @@ def main():
     parser.add_argument("--once", action="store_true", help="Print a snapshot and exit")
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--output", type=Path, default=Path("/run/multiload-qubes/metrics"))
+    parser.add_argument("--network-qube", default="sys-net", help="Qube owning the physical network interfaces")
+    parser.add_argument("--no-network", action="store_true")
     args = parser.parse_args()
+    if not args.network_qube or args.network_qube.startswith("-") or not all(x.isascii() and (x.isalnum() or x in "-_") for x in args.network_qube):
+        parser.error("invalid network qube name")
     if not math.isfinite(args.interval) or not 0.25 <= args.interval <= 10:
         parser.error("interval must be between 0.25 and 10 seconds")
     # Imported here so pure accounting tests also run on non-Xen dev machines.
@@ -147,14 +313,27 @@ def main():
         return
     args.output.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO)
-    while True:
-        start = time.monotonic()
-        try:
-            publish(args.output, collector.sample(args.interval))
-        except Exception:
-            # Leave the previous timestamp intact: the panel will flag stale data.
-            logging.exception("Cannot collect Xen metrics")
-        time.sleep(max(0, args.interval - (time.monotonic() - start)))
+    network = None if args.no_network else NetworkReader(args.network_qube)
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    collector.network = network
+    if network:
+        network.start()
+    try:
+        while True:
+            start = time.monotonic()
+            try:
+                publish(args.output, collector.sample(args.interval))
+            except Exception:
+                # Leave the timestamp intact so the panel flags stale Xen data.
+                logging.exception("Cannot collect Xen metrics")
+            time.sleep(max(0, args.interval - (time.monotonic() - start)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if network:
+            network.close()
 
 
 if __name__ == "__main__":
