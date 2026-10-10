@@ -10,7 +10,7 @@ extern Graphs *mq_new(void);
 extern void mq_free(Graphs *);
 extern void mq_tick(Graphs *, int);
 extern const char *mq_tooltip(Graphs *, int, int);
-extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int, int, int, int);
+extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int, int, int, int, int);
 
 typedef struct {
     XfcePanelPlugin *plugin;
@@ -18,18 +18,18 @@ typedef struct {
     Graphs *graphs;
     guint timer;
     int width, interval;
-    gboolean cpu, ram, network, swap, disk, demo, vertical;
+    gboolean cpu, ram, qube_ram, network, swap, disk, demo, vertical;
 } Plugin;
 
 typedef struct {
     Plugin *owner;
-    GtkWidget *width, *interval, *cpu, *ram, *network, *swap, *disk;
+    GtkWidget *width, *interval, *cpu, *ram, *qube_ram, *network, *swap, *disk;
 } Settings;
 
 static void resize(Plugin *p) {
     int size = p->plugin ? xfce_panel_plugin_get_size(p->plugin) : 48;
     int width = p->width ? p->width : size;
-    int count = p->cpu + p->ram + p->network + p->swap + p->disk;
+    int count = p->cpu + p->ram + p->qube_ram + p->network + p->swap + p->disk;
     gtk_widget_set_size_request(p->area, p->vertical ? size : width * count,
                                p->vertical ? width * count : size);
 }
@@ -47,25 +47,26 @@ static void restart_timer(Plugin *p) {
 static gboolean draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
     Plugin *p = data;
     mq_draw(p->graphs, cr, gtk_widget_get_allocated_width(widget),
-            gtk_widget_get_allocated_height(widget), p->cpu, p->ram, p->network, p->swap, p->disk, p->vertical);
+            gtk_widget_get_allocated_height(widget), p->cpu, p->ram, p->qube_ram, p->network, p->swap, p->disk, p->vertical);
     return FALSE;
 }
 /* Match mq_draw's integer chart sizes, including any unused trailing pixels. */
 static int chart_at(const Plugin *p, int width, int height, int x, int y, GdkRectangle *area) {
-    int enabled[] = {p->cpu, p->ram, p->network, p->swap, p->disk};
-    int count = p->cpu + p->ram + p->network + p->swap + p->disk;
+    int enabled[] = {p->cpu, p->ram, p->qube_ram, p->network, p->swap, p->disk};
+    int count = p->cpu + p->ram + p->qube_ram + p->network + p->swap + p->disk;
     if (!count || x < 0 || y < 0 || x >= width || y >= height) return -1;
     int cw = p->vertical ? width : width / count;
     int ch = p->vertical ? height / count : height;
     if (cw < 4 || ch < 4) return -1;
     int index = p->vertical ? y / ch : x / cw;
+    int kinds[] = {0, 1, 5, 2, 3, 4};
     int slot = 0;
-    for (int kind = 0; kind < 5; kind++) {
-        if (!enabled[kind]) continue;
+    for (int position = 0; position < 6; position++) {
+        if (!enabled[position]) continue;
         if (slot++ == index) {
             *area = (GdkRectangle){p->vertical ? 0 : index * cw,
                 p->vertical ? index * ch : 0, cw, ch};
-            return kind;
+            return kinds[position];
         }
     }
     return -1;
@@ -90,6 +91,7 @@ static void save(XfcePanelPlugin *plugin, Plugin *p) {
     g_key_file_set_integer(key, "Graphs", "interval_ms", p->interval);
     g_key_file_set_boolean(key, "Graphs", "cpu", p->cpu);
     g_key_file_set_boolean(key, "Graphs", "ram", p->ram);
+    g_key_file_set_boolean(key, "Graphs", "qube_ram", p->qube_ram);
     g_key_file_set_boolean(key, "Graphs", "network", p->network);
     g_key_file_set_boolean(key, "Graphs", "swap", p->swap);
     g_key_file_set_boolean(key, "Graphs", "disk", p->disk);
@@ -111,10 +113,11 @@ static void load(Plugin *p) {
         p->interval = CLAMP(g_key_file_get_integer(key, "Graphs", "interval_ms", NULL), 250, 10000);
         p->cpu = g_key_file_get_boolean(key, "Graphs", "cpu", NULL);
         p->ram = g_key_file_get_boolean(key, "Graphs", "ram", NULL);
+        p->qube_ram = !g_key_file_has_key(key, "Graphs", "qube_ram", NULL) || g_key_file_get_boolean(key, "Graphs", "qube_ram", NULL);
         p->network = !g_key_file_has_key(key, "Graphs", "network", NULL) || g_key_file_get_boolean(key, "Graphs", "network", NULL);
         p->swap = !g_key_file_has_key(key, "Graphs", "swap", NULL) || g_key_file_get_boolean(key, "Graphs", "swap", NULL);
         p->disk = !g_key_file_has_key(key, "Graphs", "disk", NULL) || g_key_file_get_boolean(key, "Graphs", "disk", NULL);
-        if (!p->cpu && !p->ram && !p->network && !p->swap && !p->disk) p->cpu = p->ram = TRUE;
+        if (!p->cpu && !p->ram && !p->qube_ram && !p->network && !p->swap && !p->disk) p->cpu = p->ram = TRUE;
     }
     g_key_file_unref(key);
     g_free(path);
@@ -150,10 +153,11 @@ static void settings_response(GtkDialog *dialog, gint response, Settings *s) {
         p->interval = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(s->interval));
         p->cpu = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->cpu));
         p->ram = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->ram));
+        p->qube_ram = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->qube_ram));
         p->network = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->network));
         p->swap = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->swap));
         p->disk = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->disk));
-        if (!p->cpu && !p->ram && !p->network && !p->swap && !p->disk) p->cpu = p->ram = TRUE;
+        if (!p->cpu && !p->ram && !p->qube_ram && !p->network && !p->swap && !p->disk) p->cpu = p->ram = TRUE;
         resize(p); restart_timer(p); save(p->plugin, p);
     }
     gtk_widget_destroy(GTK_WIDGET(dialog));
@@ -171,6 +175,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     GtkWidget *interval = gtk_spin_button_new_with_range(250, 10000, 250);
     GtkWidget *cpu = gtk_check_button_new_with_label("CPU");
     GtkWidget *ram = gtk_check_button_new_with_label("RAM");
+    GtkWidget *qube_ram = gtk_check_button_new_with_label("Qube RAM");
     GtkWidget *network = gtk_check_button_new_with_label("Network");
     GtkWidget *swap = gtk_check_button_new_with_label("Swap");
     GtkWidget *disk = gtk_check_button_new_with_label("Disk I/O");
@@ -178,6 +183,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(interval), p->interval);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cpu), p->cpu);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ram), p->ram);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(qube_ram), p->qube_ram);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(network), p->network);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(swap), p->swap);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(disk), p->disk);
@@ -187,13 +193,14 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
     gtk_grid_attach(GTK_GRID(grid), interval, 1, 1, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), cpu, 0, 2, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), ram, 1, 2, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), network, 0, 3, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), swap, 1, 3, 1, 1);
-    gtk_grid_attach(GTK_GRID(grid), disk, 0, 4, 2, 1);
-    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown\nSwap: purple lines per domain; light fill = highest usage\n100% = one domain’s enabled swap; grey marks = missing reports\nDisk: orange = read; light orange = write"), 0, 5, 2, 1);
+    gtk_grid_attach(GTK_GRID(grid), qube_ram, 0, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), network, 1, 3, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), swap, 0, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), disk, 1, 4, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), gtk_label_new("RAM: green = used; light green = allocated spare\nRed = allocation whose usage is unknown\nQube RAM: bright lines per domain; faint fill = highest usage\n100% = that domain's current guest-visible RAM\nSwap: purple lines per domain; light fill = highest usage\n100% = one domain’s enabled swap; grey marks = missing reports\nDisk: orange = read; light orange = write"), 0, 5, 2, 1);
     gtk_container_add(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(p->dialog))), grid);
     Settings *s = g_new0(Settings, 1);
-    *s = (Settings){p, width, interval, cpu, ram, network, swap, disk};
+    *s = (Settings){p, width, interval, cpu, ram, qube_ram, network, swap, disk};
     g_object_set_data(G_OBJECT(p->dialog), "settings", s);
     g_signal_connect(p->dialog, "response", G_CALLBACK(settings_response), s);
     g_signal_connect(p->dialog, "destroy", G_CALLBACK(settings_closed), s);
@@ -201,13 +208,13 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.6.3",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.7.2",
         "comments", "CPU, RAM, network, swap and disk I/O graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }
 static Plugin *create(void) {
     Plugin *p = g_new0(Plugin, 1);
-    p->cpu = p->ram = p->network = p->swap = p->disk = TRUE; p->interval = 1000;
+    p->cpu = p->ram = p->qube_ram = p->network = p->swap = p->disk = TRUE; p->interval = 1000;
     p->graphs = mq_new();
     p->area = gtk_drawing_area_new();
     gtk_widget_add_events(p->area, GDK_BUTTON_PRESS_MASK);
@@ -246,7 +253,7 @@ static int self_test(void) {
     g_object_ref_sink(p->plugin);
     gtk_container_add(GTK_CONTAINER(p->plugin), p->area);
     resize(p);
-    p->disk = FALSE;
+    p->disk = p->qube_ram = FALSE;
     /* Hover regions follow rendering with hidden charts, vertical panels and rounding. */
     GdkRectangle region;
     g_assert_cmpint(chart_at(p, 130, 49, 0, 0, &region), ==, 0);
@@ -272,6 +279,14 @@ static int self_test(void) {
     p->vertical = TRUE;
     g_assert_cmpint(chart_at(p, 49, 163, 0, 128, &region), ==, 4);
     p->vertical = FALSE;
+    p->qube_ram = TRUE;
+    /* Qube RAM is third, directly after host RAM, in both orientations. */
+    g_assert_cmpint(chart_at(p, 195, 49, 32, 0, &region), ==, 1);
+    g_assert_cmpint(chart_at(p, 195, 49, 64, 0, &region), ==, 5);
+    g_assert_cmpint(chart_at(p, 195, 49, 96, 0, &region), ==, 2);
+    p->vertical = TRUE;
+    g_assert_cmpint(chart_at(p, 49, 195, 0, 64, &region), ==, 5);
+    p->vertical = FALSE;
     configure(p->plugin, p);
     Settings *s = g_object_get_data(G_OBJECT(p->dialog), "settings");
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->width), 64);
@@ -280,6 +295,7 @@ static int self_test(void) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->network), FALSE);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->swap), FALSE);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->disk), FALSE);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(s->qube_ram), FALSE);
     gtk_dialog_response(GTK_DIALOG(p->dialog), GTK_RESPONSE_OK);
     g_assert_null(p->dialog);
     g_assert_cmpint(p->width, ==, 64);
@@ -288,7 +304,8 @@ static int self_test(void) {
     g_assert_false(p->network);
     g_assert_false(p->swap);
     g_assert_false(p->disk);
-    p->width = 0; p->interval = 1000; p->cpu = p->network = p->swap = p->disk = TRUE;
+    g_assert_false(p->qube_ram);
+    p->width = 0; p->interval = 1000; p->cpu = p->network = p->swap = p->disk = p->qube_ram = TRUE;
     load(p);
     g_assert_cmpint(p->width, ==, 64);
     g_assert_cmpint(p->interval, ==, 500);
@@ -296,18 +313,21 @@ static int self_test(void) {
     g_assert_false(p->network);
     g_assert_false(p->swap);
     g_assert_false(p->disk);
+    g_assert_false(p->qube_ram);
     /* Existing configurations should gain new charts without losing other settings. */
     char *legacy_path = xfce_panel_plugin_lookup_rc_file(p->plugin);
     GKeyFile *legacy = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(legacy, legacy_path, G_KEY_FILE_NONE, NULL));
     g_assert_true(g_key_file_remove_key(legacy, "Graphs", "swap", NULL));
     g_assert_true(g_key_file_remove_key(legacy, "Graphs", "disk", NULL));
+    g_assert_true(g_key_file_remove_key(legacy, "Graphs", "qube_ram", NULL));
     g_assert_true(g_key_file_save_to_file(legacy, legacy_path, NULL));
     g_key_file_unref(legacy);
     g_free(legacy_path);
     load(p);
     g_assert_true(p->swap);
     g_assert_true(p->disk);
+    g_assert_true(p->qube_ram);
     g_assert_false(p->network);
     orientation_changed(p->plugin, GTK_ORIENTATION_VERTICAL, p);
     g_assert_true(p->vertical);
@@ -323,9 +343,9 @@ int main(int argc, char **argv) {
     if (argc == 3 && g_str_equal(argv[1], "--render")) {
         Graphs *graphs = mq_new();
         for (int i = 0; i < 400; i++) mq_tick(graphs, TRUE);
-        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 600, 64);
+        cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 720, 64);
         cairo_t *cr = cairo_create(surface);
-        mq_draw(graphs, cr, 600, 64, TRUE, TRUE, TRUE, TRUE, TRUE, FALSE);
+        mq_draw(graphs, cr, 720, 64, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, FALSE);
         cairo_status_t status = cairo_surface_write_to_png(surface, argv[2]);
         cairo_destroy(cr); cairo_surface_destroy(surface); mq_free(graphs);
         return status == CAIRO_STATUS_SUCCESS ? 0 : 1;

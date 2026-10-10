@@ -361,7 +361,14 @@ mod tests {
     fn stderr_flood_does_not_block_usable_metrics() {
         let reader = Reader::spawn(spec("import sys,time; sys.stderr.write('x'*2_000_000); sys.stderr.flush(); print('M1 23 1000 400',flush=True); time.sleep(20)"),
             Kind::Memory(23), Timing { stale: Duration::from_secs(2), ..timing() }).unwrap();
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
     }
 
     #[test]
@@ -409,13 +416,31 @@ mod tests {
         assert!(!connection.report(None, now));
         assert!(!connection.retry("reporter timed out".into(), deadline));
         assert!(connection.retry("guest stream closed".into(), deadline));
-        assert!(connection.report(Some(Reading::Memory(0)), now));
+        assert!(connection.report(
+            Some(Reading::Memory {
+                used: 0,
+                total: 1000,
+                swap: None
+            }),
+            now
+        ));
         assert_eq!(connection.last_error, None);
         assert_eq!(
             connection.value(now, Duration::from_secs(5)),
-            Some(Reading::Memory(0))
+            Some(Reading::Memory {
+                used: 0,
+                total: 1000,
+                swap: None
+            })
         );
-        assert!(!connection.report(Some(Reading::Memory(100)), now));
+        assert!(!connection.report(
+            Some(Reading::Memory {
+                used: 100,
+                total: 1000,
+                swap: None
+            }),
+            now
+        ));
         // A new failure after a real recovery deserves a new diagnostic.
         assert!(connection.retry("guest stream closed".into(), deadline));
     }
@@ -550,7 +575,14 @@ mod tests {
             timing(),
         )
         .unwrap();
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
         assert!(matches!(
             reader.connection.lock().unwrap().state,
             ConnectionState::Reporting { .. }
@@ -594,14 +626,28 @@ mod tests {
             timing(),
         )
         .unwrap();
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
         // Observe connection timeout/retry (then another good sample).
         let deadline = Instant::now() + Duration::from_secs(3);
         while reader.value().is_some() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(reader.value().is_none());
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
     }
     #[test]
     fn rejects_wrong_domain_flood_and_oversized_input() {
@@ -705,7 +751,14 @@ mod tests {
         let count = attempts.pids().len();
         thread::sleep(Duration::from_millis(50));
         assert_eq!(attempts.pids().len(), count);
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
         assert_eq!(attempts.pids().len(), 4);
         assert_eq!(reader.connection.lock().unwrap().last_error, None);
         let start = Instant::now();
@@ -734,7 +787,14 @@ mod tests {
         assert_eq!(reader.value(), None);
         assert!(attempts.pids().is_empty());
         std::os::unix::fs::symlink("/usr/bin/python3", &program).unwrap();
-        await_value(&reader, Reading::Memory(600));
+        await_value(
+            &reader,
+            Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None,
+            },
+        );
         drop(reader);
         attempts.assert_reaped();
 
@@ -777,7 +837,14 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             if body.starts_with("print") {
-                await_value(&reader, Reading::Memory(600));
+                await_value(
+                    &reader,
+                    Reading::Memory {
+                        used: 600,
+                        total: 1000,
+                        swap: None,
+                    },
+                );
             }
             let start = Instant::now();
             reader.stop();

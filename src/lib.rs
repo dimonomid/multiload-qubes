@@ -1,5 +1,6 @@
 //! Metrics and Cairo renderer. GTK/XFCE ownership stays in the small C adapter.
-mod swap;
+mod domain_graph;
+use domain_graph::Metric;
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
@@ -9,7 +10,7 @@ pub use multiload_qubes_snapshot::Snapshot;
 
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
-    tooltips: [CString; 5],
+    tooltips: [CString; 6],
     tooltip_view: CString,
     tick: u64,
 }
@@ -36,7 +37,8 @@ impl Graphs {
                 unknown: 4 * 1048576,
                 overhead: 256 * 1024,
                 period: 1.0,
-                swap: Some(swap::demo(t)),
+                swap: Some(domain_graph::demo(t, Metric::Swap)),
+                qube_ram: Some(domain_graph::demo(t * 0.7, Metric::Ram)),
                 disk: Some(multiload_qubes_snapshot::DiskSnapshot {
                     devices: vec!["nvme0n1".into()],
                     rates: Some((
@@ -63,7 +65,7 @@ impl Graphs {
     }
 }
 
-fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 5] {
+fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 6] {
     let text = if let Some(s) = sample {
         let cpu = s
             .cpu
@@ -106,11 +108,12 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 5] {
             format!("CPU: {cpu}\n100% = all host logical CPUs busy."),
             ram,
             network,
-            swap::tooltip(s.swap.as_ref()),
+            domain_graph::tooltip(s.swap.as_ref(), Metric::Swap),
             disk,
+            domain_graph::tooltip(s.qube_ram.as_ref(), Metric::Ram),
         ]
     } else {
-        ["CPU", "RAM", "Network", "Swap", "Disk"].map(|name| format!(
+        ["CPU", "RAM", "Network", "Swap", "Disk", "Qube RAM"].map(|name| format!(
             "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0."
         ))
     };
@@ -139,6 +142,7 @@ fn rate_text(bytes: f64) -> String {
 #[link(name = "cairo")]
 extern "C" {
     fn cairo_set_source_rgba(cr: *mut c_void, r: f64, g: f64, b: f64, a: f64);
+    fn cairo_set_antialias(cr: *mut c_void, antialias: i32);
     fn cairo_set_line_width(cr: *mut c_void, width: f64);
     fn cairo_move_to(cr: *mut c_void, x: f64, y: f64);
     fn cairo_line_to(cr: *mut c_void, x: f64, y: f64);
@@ -185,7 +189,7 @@ impl Graphs {
     unsafe fn chart(&self, cr: *mut c_void, width: i32, height: i32, kind: i32) {
         let (w, h) = (width as f64, height as f64);
         let (border, top) = match kind {
-            1 => (0x008042, 0x13261D),
+            1 | 5 => (0x008042, 0x13261D),
             2 => (0x807100, 0x262413),
             3 => (0x510080, 0x1F1326),
             4 => (0x804200, 0x261D13),
@@ -199,8 +203,13 @@ impl Graphs {
                 | (((top & 255) as f64 * scale) as u32);
             rect(cr, c, 1.0, y as f64, w - 2.0, 1.0);
         }
-        if kind == 3 {
-            self.swap_chart(cr, width, height);
+        if kind == 3 || kind == 5 {
+            self.domain_chart(
+                cr,
+                width,
+                height,
+                if kind == 5 { Metric::Ram } else { Metric::Swap },
+            );
             return;
         }
         let n = self.history.len().min((width - 2) as usize);
@@ -312,6 +321,7 @@ pub unsafe extern "C" fn mq_draw(
     height: i32,
     cpu: i32,
     ram: i32,
+    qube_ram: i32,
     network: i32,
     swap: i32,
     disk: i32,
@@ -325,6 +335,7 @@ pub unsafe extern "C" fn mq_draw(
     }
     let count = (cpu != 0) as i32
         + (ram != 0) as i32
+        + (qube_ram != 0) as i32
         + (network != 0) as i32
         + (swap != 0) as i32
         + (disk != 0) as i32;
@@ -343,7 +354,14 @@ pub unsafe extern "C" fn mq_draw(
     cairo_rectangle(cr, 0.0, 0.0, width as f64, height as f64);
     cairo_clip(cr);
     let mut index = 0;
-    for (enabled, kind) in [(cpu, 0), (ram, 1), (network, 2), (swap, 3), (disk, 4)] {
+    for (enabled, kind) in [
+        (cpu, 0),
+        (ram, 1),
+        (qube_ram, 5),
+        (network, 2),
+        (swap, 3),
+        (disk, 4),
+    ] {
         if enabled == 0 {
             continue;
         }
@@ -419,6 +437,7 @@ mod tests {
             "Network in:",
             "Swap:",
             "Disk read:",
+            "Qube RAM:",
         ];
         for (kind, label) in expected.iter().enumerate() {
             let text = graphs.tooltips[kind].to_str().unwrap();
@@ -436,9 +455,10 @@ mod tests {
             );
         }
         let missing = tooltips(None, false);
-        for (text, label) in missing
-            .iter()
-            .zip(["CPU:", "RAM:", "Network:", "Swap:", "Disk:"])
+        for (text, label) in
+            missing
+                .iter()
+                .zip(["CPU:", "RAM:", "Network:", "Swap:", "Disk:", "Qube RAM:"])
         {
             assert!(text.to_str().unwrap().starts_with(label));
             assert!(text.to_str().unwrap().contains("unavailable or stale"));
@@ -455,7 +475,7 @@ mod tests {
             .unwrap()
             .starts_with("Swap: unavailable"));
         assert!(unsafe { mq_tooltip(&mut graphs, -1, 120) }.is_null());
-        assert!(unsafe { mq_tooltip(&mut graphs, 5, 120) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, 6, 120) }.is_null());
     }
 
     #[test]

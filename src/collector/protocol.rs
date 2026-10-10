@@ -32,7 +32,7 @@ pub fn memory_used(total: &str, available: &str) -> Result<u64, String> {
     Ok(total - available)
 }
 
-pub fn dom0_used(text: &str) -> Result<u64, String> {
+pub fn dom0_memory(text: &str) -> Result<(u64, u64), String> {
     let mut total = None;
     let mut available = None;
     for line in text.lines() {
@@ -46,10 +46,11 @@ pub fn dom0_used(text: &str) -> Result<u64, String> {
             _ => {}
         }
     }
-    memory_used(
-        total.ok_or("missing MemTotal")?,
-        available.ok_or("missing MemAvailable")?,
-    )
+    let total = total.ok_or("missing MemTotal")?;
+    Ok((
+        number(total)?,
+        memory_used(total, available.ok_or("missing MemAvailable")?)?,
+    ))
 }
 
 /// Swap capacity and occupied slots, in KiB; disabled swap is (0, 0).
@@ -78,8 +79,11 @@ pub fn dom0_swap(text: &str) -> Result<(u64, u64), String> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reading {
-    Memory(u64), // Legacy M1 reporters have no swap measurement.
-    MemorySwap { used: u64, total: u64, swapped: u64 },
+    Memory {
+        used: u64,
+        total: u64,
+        swap: Option<(u64, u64)>,
+    },
     Network(f64, f64),
 }
 
@@ -117,15 +121,15 @@ impl Tracker {
                 return Err("invalid memory frame or changed domain".into());
             }
             let used = memory_used(fields[2], fields[3])?;
-            return Ok(Some(if fields[0] == "M2" {
-                let (total, swapped) = swap_usage(fields[4], fields[5])?;
-                Reading::MemorySwap {
-                    used,
-                    total,
-                    swapped,
-                }
+            let swap = if fields[0] == "M2" {
+                Some(swap_usage(fields[4], fields[5])?)
             } else {
-                Reading::Memory(used)
+                None
+            };
+            return Ok(Some(Reading::Memory {
+                used,
+                total: number(fields[2])?,
+                swap,
             }));
         }
         if fields.len() != 4 {
@@ -203,17 +207,27 @@ mod tests {
     fn memory_and_dom0() {
         assert_eq!(memory_used("1000", "400"), Ok(600));
         assert_eq!(
-            dom0_used("MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 500 kB\nSwapFree: 0 kB"),
-            Ok(600)
+            dom0_memory(
+                "MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 500 kB\nSwapFree: 0 kB"
+            ),
+            Ok((1000, 600))
         );
-        assert!(dom0_used("MemTotal: 1000 kB").is_err());
+        assert!(dom0_memory("MemTotal: 1000 kB").is_err());
         assert_eq!(
             Tracker::new(Kind::Memory(23)).update(b"M1 23 1000 400"),
-            Ok(Some(Reading::Memory(600)))
+            Ok(Some(Reading::Memory {
+                used: 600,
+                total: 1000,
+                swap: None
+            }))
         );
         assert_eq!(
             Tracker::new(Kind::Memory(23)).update(b"M1 23 1000 1000"),
-            Ok(Some(Reading::Memory(0)))
+            Ok(Some(Reading::Memory {
+                used: 0,
+                total: 1000,
+                swap: None
+            }))
         );
     }
     #[test]
@@ -224,10 +238,10 @@ mod tests {
         ] {
             assert_eq!(
                 Tracker::new(Kind::Memory(23)).update(frame.as_bytes()),
-                Ok(Some(Reading::MemorySwap {
+                Ok(Some(Reading::Memory {
                     used: 600,
-                    total,
-                    swapped
+                    total: 1000,
+                    swap: Some((total, swapped))
                 }))
             );
         }

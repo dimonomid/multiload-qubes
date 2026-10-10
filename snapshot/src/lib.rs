@@ -4,11 +4,11 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const MAX_WIRE_BYTES: usize = 32 * 1024;
-pub const MAX_SWAP_ENTRIES: usize = 129; // 128 guest readers plus dom0.
+pub const MAX_WIRE_BYTES: usize = 64 * 1024;
+pub const MAX_DOMAIN_ENTRIES: usize = 129; // 128 guest readers plus dom0.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SwapEntry {
+pub struct DomainUsage {
     /// Domain incarnation key: a restarted qube starts a new line segment.
     pub id: String,
     /// Validated dom0-sourced qube name (never a guest-provided label).
@@ -16,24 +16,24 @@ pub struct SwapEntry {
     pub total: u64,
     pub used: u64,
 }
-impl SwapEntry {
+impl DomainUsage {
     pub fn percent(&self) -> Option<f64> {
         (self.total > 0).then(|| self.used as f64 / self.total as f64 * 100.0)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SwapSnapshot {
+pub struct DomainUsageSnapshot {
     /// Number of running, eligible guests plus dom0, including missing reports.
     pub expected: u32,
-    pub entries: Vec<SwapEntry>,
+    pub entries: Vec<DomainUsage>,
 }
-impl SwapSnapshot {
-    /// None means no reporting domain has enabled swap; never invent a zero.
+impl DomainUsageSnapshot {
+    /// None means there are no nonzero reporting totals; never invent a zero.
     pub fn peak(&self) -> Option<f64> {
         self.entries
             .iter()
-            .filter_map(SwapEntry::percent)
+            .filter_map(DomainUsage::percent)
             .reduce(f64::max)
     }
 }
@@ -42,7 +42,8 @@ pub const MAX_DISK_DEVICES: usize = 64;
 
 /// Names come from the kernel, and must remain safe in plain-text tooltips/wire records.
 pub fn disk_name(name: &str) -> bool {
-    !name.is_empty()
+    name != "unknown"
+        && !name.is_empty()
         && name.len() <= 63
         && name.as_bytes()[0].is_ascii_alphanumeric()
         && name
@@ -78,9 +79,11 @@ pub struct Snapshot {
     /// Incoming and outgoing bytes/second, or unavailable/warming up.
     pub network: Option<(f64, f64)>,
     /// Per-domain swap, absent in legacy snapshots. All quantities are KiB.
-    pub swap: Option<SwapSnapshot>,
+    pub swap: Option<DomainUsageSnapshot>,
     /// Physical block-device activity in dom0, absent when unavailable or legacy.
     pub disk: Option<DiskSnapshot>,
+    /// Current guest-visible RAM totals and usage, including dom0, in KiB.
+    pub qube_ram: Option<DomainUsageSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +97,7 @@ impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => write!(f, "snapshot exceeds {MAX_WIRE_BYTES} bytes"),
-            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4 snapshot format"),
+            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4/MQ5 snapshot format"),
             Self::InvalidField(field) => write!(f, "invalid snapshot field: {field}"),
             Self::Stale => write!(f, "snapshot is stale or too far in the future"),
         }
@@ -128,6 +131,57 @@ fn decode_rates(a: &str, b: &str) -> Result<Option<(f64, f64)>, SnapshotError> {
             field(b, "rate bytes/second")?,
         )))
     }
+}
+
+fn encode_domains(usage: Option<&DomainUsageSnapshot>) -> String {
+    let Some(usage) = usage else {
+        return "unknown -".into();
+    };
+    let entries = if usage.entries.is_empty() {
+        "-".into()
+    } else {
+        usage
+            .entries
+            .iter()
+            .map(|e| format!("{}:{}:{}:{}", e.id, e.name, e.total, e.used))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!("{} {entries}", usage.expected)
+}
+fn decode_domains(
+    expected: &str,
+    entries: &str,
+) -> Result<Option<DomainUsageSnapshot>, SnapshotError> {
+    if expected == "unknown" {
+        return if entries == "-" {
+            Ok(None)
+        } else {
+            Err(SnapshotError::InvalidField("unknown domain entries"))
+        };
+    }
+    let mut values = Vec::new();
+    if entries != "-" {
+        for item in entries.split(',') {
+            if values.len() >= MAX_DOMAIN_ENTRIES {
+                return Err(SnapshotError::InvalidField("domain usage coverage"));
+            }
+            let fields: Vec<_> = item.split(':').collect();
+            if fields.len() != 4 {
+                return Err(SnapshotError::InvalidField("domain usage entry"));
+            }
+            values.push(DomainUsage {
+                id: fields[0].into(),
+                name: fields[1].into(),
+                total: field(fields[2], "domain total KiB")?,
+                used: field(fields[3], "domain used KiB")?,
+            });
+        }
+    }
+    Ok(Some(DomainUsageSnapshot {
+        expected: field(expected, "expected reporters")?,
+        entries: values,
+    }))
 }
 
 impl Snapshot {
@@ -170,12 +224,14 @@ impl Snapshot {
                 return Err(SnapshotError::InvalidField("disk activity"));
             }
         }
-        if let Some(swap) = &self.swap {
+        for (usage, is_ram) in [(&self.swap, false), (&self.qube_ram, true)] {
+            let Some(swap) = usage else { continue };
             let mut ids = std::collections::BTreeSet::new();
             let mut names = std::collections::BTreeSet::new();
-            if swap.entries.len() > MAX_SWAP_ENTRIES || swap.entries.len() > swap.expected as usize
+            if swap.entries.len() > MAX_DOMAIN_ENTRIES
+                || swap.entries.len() > swap.expected as usize
             {
-                return Err(SnapshotError::InvalidField("swap coverage"));
+                return Err(SnapshotError::InvalidField("domain usage coverage"));
             }
             for entry in &swap.entries {
                 if entry.id.is_empty()
@@ -191,12 +247,13 @@ impl Snapshot {
                         .name
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    || (is_ram && entry.total == 0)
                     || entry.used > entry.total
                     || entry.total > i64::MAX as u64
                     || !ids.insert(&entry.id)
                     || !names.insert(&entry.name)
                 {
-                    return Err(SnapshotError::InvalidField("swap entry"));
+                    return Err(SnapshotError::InvalidField("domain usage entry"));
                 }
             }
         }
@@ -212,14 +269,16 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Encode MQ4 with disk data, MQ3 with swap, or legacy MQ2 otherwise.
+    /// Write MQ5 for per-domain RAM, otherwise preserve the MQ2/MQ3/MQ4 layout.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
             .cpu
             .map_or_else(|| "unknown".into(), |v| format!("{v:.4}"));
         let network = encode_rates(self.network);
-        let version = if self.disk.is_some() {
+        let version = if self.qube_ram.is_some() {
+            "MQ5"
+        } else if self.disk.is_some() {
             "MQ4"
         } else if self.swap.is_some() {
             "MQ3"
@@ -236,19 +295,8 @@ impl Snapshot {
             self.overhead,
             self.period
         );
-        if let Some(swap) = &self.swap {
-            let entries = if swap.entries.is_empty() {
-                "-".to_owned()
-            } else {
-                swap.entries
-                    .iter()
-                    .map(|e| format!("{}:{}:{}:{}", e.id, e.name, e.total, e.used))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            line.push_str(&format!(" {} {entries}", swap.expected));
-        } else if self.disk.is_some() {
-            line.push_str(" unknown -");
+        if version != "MQ2" {
+            line.push_str(&format!(" {}", encode_domains(self.swap.as_ref())));
         }
         if let Some(disk) = &self.disk {
             let devices = if disk.devices.is_empty() {
@@ -257,6 +305,11 @@ impl Snapshot {
                 disk.devices.join(",")
             };
             line.push_str(&format!(" {} {devices}", encode_rates(disk.rates)));
+        } else if version == "MQ5" {
+            line.push_str(" unknown unknown unknown");
+        }
+        if let Some(ram) = &self.qube_ram {
+            line.push_str(&format!(" {}", encode_domains(Some(ram))));
         }
         line.push('\n');
         if line.len() > MAX_WIRE_BYTES {
@@ -274,7 +327,8 @@ impl Snapshot {
         if !((p.len() == 9 && p[0] == "MQ1")
             || (p.len() == 11 && p[0] == "MQ2")
             || (p.len() == 13 && p[0] == "MQ3")
-            || (p.len() == 16 && p[0] == "MQ4"))
+            || (p.len() == 16 && p[0] == "MQ4")
+            || (p.len() == 18 && p[0] == "MQ5"))
         {
             return Err(SnapshotError::InvalidFormat);
         }
@@ -283,44 +337,37 @@ impl Snapshot {
         } else {
             decode_rates(p[9], p[10])?
         };
-        let swap = if p[0] == "MQ3" || (p[0] == "MQ4" && p[11] != "unknown") {
-            let mut entries = Vec::new();
-            if p[12] != "-" {
-                for item in p[12].split(',') {
-                    if entries.len() >= MAX_SWAP_ENTRIES {
-                        return Err(SnapshotError::InvalidField("swap coverage"));
-                    }
-                    let fields: Vec<_> = item.split(':').collect();
-                    if fields.len() != 4 {
-                        return Err(SnapshotError::InvalidField("swap entry"));
-                    }
-                    entries.push(SwapEntry {
-                        id: fields[0].into(),
-                        name: fields[1].into(),
-                        total: field(fields[2], "swap total KiB")?,
-                        used: field(fields[3], "swap used KiB")?,
-                    });
-                }
+        let swap = if matches!(p[0], "MQ3" | "MQ4" | "MQ5") {
+            let value = decode_domains(p[11], p[12])?;
+            if p[0] == "MQ3" && value.is_none() {
+                return Err(SnapshotError::InvalidField("swap coverage"));
             }
-            Some(SwapSnapshot {
-                expected: field(p[11], "swap expected reporters")?,
-                entries,
-            })
+            value
         } else {
             None
         };
-        if p[0] == "MQ4" && p[11] == "unknown" && p[12] != "-" {
-            return Err(SnapshotError::InvalidField("unknown swap entries"));
-        }
-        let disk = if p[0] == "MQ4" {
-            Some(DiskSnapshot {
-                devices: if p[15] == "-" {
-                    Vec::new()
-                } else {
-                    p[15].split(',').map(str::to_owned).collect()
-                },
-                rates: decode_rates(p[13], p[14])?,
-            })
+        let disk = if matches!(p[0], "MQ4" | "MQ5") {
+            let rates = decode_rates(p[13], p[14])?;
+            if p[0] == "MQ5" && p[15] == "unknown" {
+                if rates.is_some() {
+                    return Err(SnapshotError::InvalidField("unknown disk rates"));
+                }
+                None
+            } else {
+                Some(DiskSnapshot {
+                    rates,
+                    devices: if p[15] == "-" {
+                        Vec::new()
+                    } else {
+                        p[15].split(',').map(str::to_owned).collect()
+                    },
+                })
+            }
+        } else {
+            None
+        };
+        let qube_ram = if p[0] == "MQ5" {
+            Some(decode_domains(p[16], p[17])?.ok_or(SnapshotError::InvalidField("RAM coverage"))?)
         } else {
             None
         };
@@ -340,6 +387,7 @@ impl Snapshot {
             network,
             swap,
             disk,
+            qube_ram,
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -403,22 +451,22 @@ mod tests {
             "{} 4 dom0:dom0:0:0,1/vm-a:work:100:60,2/vm-b:dev:200:120\n",
             MQ2.trim().replacen("MQ2", "MQ3", 1)
         );
-        snapshot.swap = Some(SwapSnapshot {
+        snapshot.swap = Some(DomainUsageSnapshot {
             expected: 4,
             entries: vec![
-                SwapEntry {
+                DomainUsage {
                     id: "dom0".into(),
                     name: "dom0".into(),
                     total: 0,
                     used: 0,
                 },
-                SwapEntry {
+                DomainUsage {
                     id: "1/vm-a".into(),
                     name: "work".into(),
                     total: 100,
                     used: 60,
                 },
-                SwapEntry {
+                DomainUsage {
                     id: "2/vm-b".into(),
                     name: "dev".into(),
                     total: 200,
@@ -464,7 +512,7 @@ mod tests {
                 "{fields}"
             );
         }
-        let entries = (0..=MAX_SWAP_ENTRIES)
+        let entries = (0..=MAX_DOMAIN_ENTRIES)
             .map(|i| format!("id{i}:qube{i}:10:1"))
             .collect::<Vec<_>>()
             .join(",");
@@ -490,7 +538,7 @@ mod tests {
             Snapshot::decode_fresh_at(&wire, 1006.0),
             Err(SnapshotError::Stale)
         );
-        s.swap = Some(SwapSnapshot {
+        s.swap = Some(DomainUsageSnapshot {
             expected: 1,
             entries: Vec::new(),
         });
@@ -542,6 +590,81 @@ mod tests {
             &format!("{base} 0 0 sda").replace("unknown - 0", "unknown bad 0")
         )
         .is_err());
+    }
+
+    #[test]
+    fn mq5_preserves_ram_totals_and_optional_legacy_metrics() {
+        let mut s = Snapshot::decode(MQ2).unwrap();
+        s.qube_ram = Some(DomainUsageSnapshot {
+            expected: 3,
+            entries: vec![
+                DomainUsage {
+                    id: "dom0".into(),
+                    name: "dom0".into(),
+                    total: 1000,
+                    used: 400,
+                },
+                DomainUsage {
+                    id: "1/vm-a".into(),
+                    name: "work".into(),
+                    total: 2000,
+                    used: 1600,
+                },
+            ],
+        });
+        let wire = s.encode().unwrap();
+        assert!(wire.starts_with("MQ5 "));
+        assert!(wire.contains("unknown - unknown unknown unknown 3 dom0:dom0:1000:400"));
+        assert_eq!(Snapshot::decode(&wire).unwrap(), s);
+        assert_eq!(s.qube_ram.as_ref().unwrap().peak(), Some(80.0));
+        assert!(Snapshot::decode_fresh_at(&wire, 1005.5).is_ok());
+        assert_eq!(
+            Snapshot::decode_fresh_at(&wire, 1006.0),
+            Err(SnapshotError::Stale)
+        );
+        s.disk = Some(DiskSnapshot {
+            devices: Vec::new(),
+            rates: None,
+        });
+        s.swap = Some(s.qube_ram.clone().unwrap());
+        assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
+        s.qube_ram.as_mut().unwrap().entries[1].total = 1600;
+        assert_eq!(s.qube_ram.as_ref().unwrap().peak(), Some(100.0));
+        s.qube_ram.as_mut().unwrap().entries[1].total = 0;
+        assert!(s.encode().is_err());
+        let bad = wire.replace(":1000:400", ":0:0");
+        assert!(Snapshot::decode(&bad).is_err());
+        let bad = wire.replace("dom0:dom0:1000:400", "dom0:bad;name:1000:400");
+        assert!(Snapshot::decode(&bad).is_err());
+        let bad = wire.replace(" 3 dom0:", " 1 dom0:");
+        assert!(Snapshot::decode(&bad).is_err());
+        assert!(Snapshot::decode(MQ2).unwrap().qube_ram.is_none());
+    }
+
+    #[test]
+    fn mq5_bounds_two_full_domain_groups_and_rejects_duplicate_ram_identities() {
+        let mut s = Snapshot::decode(MQ2).unwrap();
+        let group = DomainUsageSnapshot {
+            expected: MAX_DOMAIN_ENTRIES as u32,
+            entries: (0..MAX_DOMAIN_ENTRIES)
+                .map(|i| DomainUsage {
+                    id: format!("{i}/{}", "a".repeat(80)),
+                    name: format!("qube{i}"),
+                    total: i64::MAX as u64,
+                    used: i64::MAX as u64 / 2,
+                })
+                .collect(),
+        };
+        s.swap = Some(group.clone());
+        s.qube_ram = Some(group);
+        let wire = s.encode().unwrap();
+        assert!(wire.len() > 32 * 1024 && wire.len() < MAX_WIRE_BYTES);
+        assert_eq!(Snapshot::decode(&wire).unwrap(), s);
+        let bad = wire.replace("1/aaaaaaaa", "0/aaaaaaaa");
+        assert!(Snapshot::decode(&bad).is_err());
+        let duplicate = s.qube_ram.as_ref().unwrap().entries[0].clone();
+        s.qube_ram.as_mut().unwrap().entries.push(duplicate);
+        assert!(s.encode().is_err());
     }
 
     #[test]

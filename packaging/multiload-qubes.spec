@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.6.3
+Version:        0.7.2
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,15 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.7.2-1
+- Make the per-qube RAM fill more visible while retaining bright pixel-sharp lines
+
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.7.1-1
+- Draw per-qube RAM and swap with pixel-aligned points and no antialiasing
+
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.7.0-1
+- Add a per-qube RAM percentage chart immediately after the host RAM chart
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.3-1
 - Use concise scale labels and Physical disk activity wording in tooltips
 

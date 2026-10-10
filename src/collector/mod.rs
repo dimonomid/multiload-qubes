@@ -5,7 +5,7 @@ mod shutdown;
 pub mod stream;
 pub mod xen;
 
-use multiload_qubes_snapshot::{unix_time_now, Snapshot, SwapEntry, SwapSnapshot};
+use multiload_qubes_snapshot::{unix_time_now, DomainUsage, DomainUsageSnapshot, Snapshot};
 use protocol::{Kind, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -159,19 +159,22 @@ impl MemoryPool {
                     return None;
                 }
                 match reader.value() {
-                    Some(Reading::Memory(used) | Reading::MemorySwap { used, .. }) => {
-                        Some((d.id, used))
-                    }
+                    Some(Reading::Memory { used, .. }) => Some((d.id, used)),
                     _ => None,
                 }
             })
             .collect()
     }
 }
-/// Missing reports stay absent, and therefore cannot be mistaken for empty swap.
-fn swap_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> SwapSnapshot {
+/// Missing reports stay absent; incarnation checks prevent old samples being reused.
+fn domain_snapshot(
+    host: &Host,
+    dom0: (u64, u64),
+    pool: Option<&MemoryPool>,
+    value: fn(Reading) -> Option<(u64, u64)>,
+) -> DomainUsageSnapshot {
     let active = eligible(host);
-    let mut entries = vec![SwapEntry {
+    let mut entries = vec![DomainUsage {
         id: "dom0".into(),
         name: "dom0".into(),
         total: dom0.0,
@@ -185,20 +188,32 @@ fn swap_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> Sw
             if identity != key {
                 continue;
             }
-            if let Some(Reading::MemorySwap { total, swapped, .. }) = reader.value() {
-                entries.push(SwapEntry {
+            if let Some((total, used)) = reader.value().and_then(value) {
+                entries.push(DomainUsage {
                     id: format!("{}/{}", id, key.uuid),
                     name: key.name.clone(),
                     total,
-                    used: swapped,
+                    used,
                 });
             }
         }
     }
-    SwapSnapshot {
+    DomainUsageSnapshot {
         expected: active.len() as u32 + 1,
         entries,
     }
+}
+fn swap_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> DomainUsageSnapshot {
+    domain_snapshot(host, dom0, pool, |r| match r {
+        Reading::Memory { swap, .. } => swap,
+        _ => None,
+    })
+}
+fn ram_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> DomainUsageSnapshot {
+    domain_snapshot(host, dom0, pool, |r| match r {
+        Reading::Memory { total, used, .. } => Some((total, used)),
+        _ => None,
+    })
 }
 
 impl Drop for MemoryPool {
@@ -254,6 +269,7 @@ pub fn snapshot(
             .saturating_sub(host.free),
         period,
         swap: None,
+        qube_ram: None,
         disk: None,
         network: match network {
             Some(Reading::Network(rx, tx)) => Some((rx, tx)),
@@ -306,9 +322,17 @@ pub fn run(options: Options) -> Result<(), String> {
     if options.once {
         let host = xen.sample()?;
         let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-        let usage = protocol::dom0_used(&meminfo)?;
-        let mut data = snapshot(&host, usage, &BTreeMap::new(), None, None, options.interval)?;
+        let usage = protocol::dom0_memory(&meminfo)?;
+        let mut data = snapshot(
+            &host,
+            usage.1,
+            &BTreeMap::new(),
+            None,
+            None,
+            options.interval,
+        )?;
         data.swap = Some(swap_snapshot(&host, protocol::dom0_swap(&meminfo)?, None));
+        data.qube_ram = Some(ram_snapshot(&host, usage, None));
         data.disk = disk.sample(start.elapsed());
         print!("{}", data.encode().map_err(|e| e.to_string())?);
         return Ok(());
@@ -345,10 +369,10 @@ pub fn run(options: Options) -> Result<(), String> {
                 BTreeMap::new()
             };
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-            let dom0 = protocol::dom0_used(&meminfo)?;
+            let dom0 = protocol::dom0_memory(&meminfo)?;
             let mut data = snapshot(
                 &host,
-                dom0,
+                dom0.1,
                 &readings,
                 cpu,
                 network.as_ref().and_then(Reader::value),
@@ -359,6 +383,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 protocol::dom0_swap(&meminfo)?,
                 memory.as_ref(),
             ));
+            data.qube_ram = Some(ram_snapshot(&host, dom0, memory.as_ref()));
             data.disk = disk.sample(start.elapsed());
             publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
         })();
@@ -501,6 +526,12 @@ mod tests {
         assert_eq!(data.entries[1].used, 375);
         assert_eq!(data.peak(), Some(75.0));
         assert_eq!(pool.readings(&host)[&1], 600); // Swap is never added to RAM.
+        let ram = ram_snapshot(&host, (2000, 400), Some(&pool));
+        assert_eq!(ram.expected, 3);
+        assert_eq!(ram.entries[0].total, 2000);
+        assert_eq!(ram.entries[1].total, 1000);
+        assert_eq!(ram.entries[1].used, 600);
+        assert_eq!(ram.peak(), Some(60.0));
         host.domains[1].identity = "new-identity".into();
         assert_eq!(swap_snapshot(&host, (0, 0), Some(&pool)).entries.len(), 2);
         host.domains[2].paused = true;
@@ -508,6 +539,9 @@ mod tests {
         assert_eq!(data.expected, 2);
         assert_eq!(data.entries.len(), 1);
         assert_eq!(data.peak(), None);
+        let ram = ram_snapshot(&host, (2000, 400), Some(&pool));
+        assert_eq!(ram.expected, 2);
+        assert_eq!(ram.entries.len(), 1);
         assert_eq!(swap_snapshot(&host, (0, 0), None).entries.len(), 1);
     }
 

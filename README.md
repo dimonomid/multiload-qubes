@@ -1,6 +1,6 @@
 # Multiload for Qubes
 
-A native GTK3 XFCE panel plugin with scrolling CPU, RAM, network, per-domain swap and disk I/O graphs.
+A native GTK3 XFCE panel plugin with scrolling CPU, host RAM, per-qube RAM, network, swap and disk I/O graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
 Rust implements collection, snapshot validation, history and Cairo rendering; a small C
 adapter handles GTK3/XFCE registration, events and settings. The collector CLI uses clap; Cargo.lock pins dependency versions. Slint is not required.
@@ -21,6 +21,13 @@ adapter handles GTK3/XFCE registration, events and settings. The collector CLI u
   the required reports. Used is then a lower bound, identified in the tooltip.
 - RAM is scaled against Xen's physical total. The tooltip separately lists Xen
   and unattributed overhead. That overhead is not painted as guest-used RAM.
+- **Qube RAM:** directly after host RAM, bright green lines show each reporting
+  domain's `(MemTotal - MemAvailable) / MemTotal` on a fixed 0–100% scale, including
+  dom0. A subtle dark-green fill follows the highest percentage; lines
+  overlap rather than stack. Its tooltip lists the highest percentages, used/total
+  RAM and reporting coverage. Missing reports and restarted qubes break lines.
+  The denominator is current guest-visible RAM, so ballooning can change the
+  percentage without an application allocating more memory.
 - **Network:** incoming yellow (`#E2CC05`), outgoing olive (`#696018`), stacked
   rates from sys-net’s physical NICs. The scale follows the visible combined peak
   (rounded up to a power of two, with a 1 KiB/s minimum). Tooltips show KiB/s or
@@ -96,7 +103,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.6.3-1*.rpm
+sudo dnf install ./multiload-qubes-0.7.2-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -136,7 +143,7 @@ Only the collector service has Xen privileges; the GUI never runs as root. Rust
 handles CPU accounting, guest connection lifecycle, memory aggregation, validation,
 timeouts and atomic publication at `/run/multiload-qubes/metrics`. Unix descriptor flags and process-group signals use `nix`; scoped SIGINT/SIGTERM
 registrations use `signal-hook`. The systemd unit and collection options remain
-unchanged; MQ4 extends snapshots with disk rates and monitored-device names. Sampling defaults to 1s; changing the
+unchanged; MQ5 extends snapshots with per-domain RAM totals and used values. Sampling defaults to 1s; changing the
 panel refresh interval changes chart history sampling, not collection frequency.
 
 The remaining Python code is the small payloads in `guest/memory.py`
@@ -209,13 +216,13 @@ measurements and dom0 packaging must still be validated on the target machine.
 
 Snapshot fields, units, validation and encoding/decoding live in the shared local
 Rust crate `snapshot/`. Both the collector and panel depend on its `Snapshot`
-type. The collector builds a typed snapshot and encodes MQ4; the panel decodes
+type. The collector builds a typed snapshot and encodes MQ5; the panel decodes
 through the same contract and applies the shared freshness policy. The shared
 crate has no Xen or GTK/Cairo dependencies, so the collector keeps its existing
 native dependencies. Atomic file replacement is unchanged.
 
-The decoder accepts MQ1 through MQ4. The encoder writes MQ4 when disk data is
-present, MQ3 when only swap is present, otherwise MQ2. It preserves six timestamp
+The decoder accepts MQ1 through MQ5. The encoder writes MQ5 when per-domain RAM
+is present, otherwise MQ4 for disk data, MQ3 for swap, or MQ2. It preserves six timestamp
 decimals, four CPU decimals and three network/disk rate decimals.
 Structural validation is independent of the clock. The panel additionally allows
 up to five seconds of future clock skew and max(5 seconds, four collection
@@ -230,13 +237,16 @@ entries are comma-separated `incarnation_id:name:total_kib:used_kib` records, or
 `-` if empty. IDs include the Xen domain ID and VM identity to distinguish
 restarts. Names come from dom0 metadata, never guest output; the shared codec
 validates bounded ASCII labels, unique names/IDs, totals and coverage. Files are
-bounded to 32 KiB and 129 swap entries (128 guest readers plus dom0).
+bounded to 64 KiB and 129 entries per domain metric (128 guest readers plus dom0).
 MQ4 appends `read_bytes_per_second write_bytes_per_second disk_devices`. Rates
 are both `unknown` while warming up or with no devices; names are comma-separated,
 or `-` if none. MQ4 permits `unknown -` in the swap extension for missing swap data.
 Disk names are validated ASCII, unique, at most 63 bytes each, with at most 64 disks.
-The GUI continues to accept MQ1/MQ2/MQ3 snapshots during upgrades, with metrics
-absent from those versions shown as unavailable.
+MQ5 appends `expected_ram_reporters ram_entries`, with the same bounded
+`incarnation_id:name:total_kib:used_kib` records as swap. RAM totals must be nonzero.
+The disk device token `unknown` represents unavailable disk data in MQ5; `-`
+continues to mean a known empty device list. The GUI continues to accept MQ1–MQ4
+snapshots during upgrades, with absent metrics shown as unavailable.
 
 ## Network collection and upgrading
 
@@ -279,6 +289,30 @@ in Properties. Test a download/upload in an app qube and compare with the physic
 interface counters inside sys-net. Stop/restart sys-net to check recovery. Real
 qrexec traffic still needs testing on the target dom0; automated tests cover the
 stream reader with local child processes, protocol validation and guest NIC selection.
+
+## Per-qube RAM chart and upgrading
+
+Qube RAM is enabled by default and can be hidden independently in Properties. It
+appears immediately after host RAM in horizontal and vertical panels. Both use
+existing M1/M2 guest memory frames: the collector now retains each frame's
+`MemTotal` as well as used RAM. The guest payload and connection count are
+unchanged. dom0 is read locally. `--no-guest-memory` leaves only dom0 reporting;
+missing guest reports stay unknown instead of becoming zero usage. Paused and
+internal domains are excluded, and incarnation IDs prevent lines joining across
+qube restarts. The per-domain graph and tooltip code is shared with swap.
+
+Bright lines use tints of multiload-ng's `#43D18D`; the highest-percentage fill
+uses dark `#03964F` at 25% opacity. RAM and swap lines are snapped to pixel
+centers and drawn without antialiasing; the fills keep their intended opacity. The chart tracks current RAM headroom within
+individual domains, while the host RAM chart continues to show physical usage,
+allocation and unknown usage. Guest totals are not replaced with configured
+maximum memory or Xen allocation. Reclaimable memory is accounted for through
+`MemAvailable`; swap is excluded.
+
+After installing v0.7.2, restart the collector and run `xfce4-panel -r`. Compare a
+qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
+its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
+Qube RAM needs MQ5 data from the updated collector.
 
 ## Swap collection and upgrading
 
@@ -334,7 +368,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.6.3, restart the collector and panel using the commands above.
+After installing v0.7.2, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid
