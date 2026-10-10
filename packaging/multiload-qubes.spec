@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM and network graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -52,6 +52,9 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.3.0-1
+- Sample guest RAM directly over persistent Qubes connections
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.2.0-1
 - Add network chart using a persistent sys-net counter stream
 

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Read-only Xen/Qubes collector with a persistent sys-net counter reader.
+"""Read-only Xen/Qubes collector with persistent guest memory and network readers.
 
 Only this service needs Xen privileges. The panel reads an atomic numeric snapshot.
 All memory quantities are KiB. Guest reports are untrusted, bounded integers.
@@ -32,16 +32,11 @@ def number(raw):
     return value if value <= 2**63 - 1 else None
 
 
-def physical_used(demand, swap, allocated):
-    """meminfo = resident non-cache usage + swap; swapinfo = used swap.
-
-    Never assume zero swap when swapinfo is absent (older agents). Reports
-    are thresholded separately; allow small skew by clamping to allocation.
-    """
-    demand, swap = number(demand), number(swap)
-    if demand is None or swap is None or demand < swap:
-        return None
-    return min(demand - swap, allocated)
+def memory_used(total, available):
+    total, available = number(total), number(available)
+    if total is None or available is None or total == 0 or available > total:
+        raise ValueError('Invalid memory totals')
+    return total - available
 
 
 def dom0_used(path=Path("/proc/meminfo")):
@@ -49,10 +44,8 @@ def dom0_used(path=Path("/proc/meminfo")):
     for line in path.read_text().splitlines():
         key, _, value = line.partition(":")
         if value.split():
-            fields[key] = int(value.split()[0])
-    # Same resident-memory definition as Qubes' meminfo-writer, without swap.
-    return max(0, fields["MemTotal"] - fields["MemFree"]
-               - fields["Buffers"] - fields["Cached"])
+            fields[key] = value.split()[0]
+    return memory_used(fields.get('MemTotal'), fields.get('MemAvailable'))
 
 
 class CpuTracker:
@@ -98,6 +91,33 @@ while True:
     print('N1', time.monotonic_ns(), boot, ','.join(rows) or '-', flush=True)
     time.sleep(1)
 """
+
+
+MEMORY_SCRIPT = r"""
+import pathlib, subprocess, time
+domid = subprocess.check_output(['xenstore-read', 'domid'], text=True).strip()
+while True:
+    fields = {}
+    for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
+        key, _, value = line.partition(':')
+        if key in ('MemTotal', 'MemAvailable'):
+            fields[key] = int(value.split()[0])
+    print('M1', domid, fields['MemTotal'], fields['MemAvailable'], flush=True)
+    time.sleep(1)
+"""
+
+
+class MemoryTracker:
+    def __init__(self, domid):
+        self.domid = domid
+
+    def update(self, line):
+        if len(line) > 256:
+            raise ValueError('Oversized memory sample')
+        fields = line.decode('ascii').split()
+        if len(fields) != 4 or fields[0] != 'M1' or number(fields[1]) != self.domid:
+            raise ValueError('Invalid memory sample or changed domain')
+        return memory_used(fields[2], fields[3])
 
 
 def parse_network(line):
@@ -152,30 +172,35 @@ class NetworkTracker:
         return rates
 
 
-class NetworkReader:
+class GuestReader:
     """Nonblocking for Xen collection; bounded reads and reconnect after failure."""
-    def __init__(self, qube='sys-net'):
+    def __init__(self, qube, script, tracker_factory):
         self.qube = qube
+        self.script = script
+        self.tracker_factory = tracker_factory
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.latest = None
-        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread = threading.Thread(target=self.run, name=f"metrics-{qube}", daemon=True)
 
     def start(self):
         self.thread.start()
 
-    def rates(self):
+    def value(self):
         with self.lock:
             if self.latest is None or time.monotonic() - self.latest[0] > 5:
                 return None
             return self.latest[1]
 
-    def close(self):
+    def stop(self):
         self.stop_event.set()
+
+    def close(self):
+        self.stop()
         self.thread.join(timeout=8)
 
     def run(self):
-        command = 'python3 -u -c ' + shlex.quote(NETWORK_SCRIPT)
+        command = 'python3 -u -c ' + shlex.quote(self.script)
         while not self.stop_event.is_set():
             proc = None
             try:
@@ -183,12 +208,12 @@ class NetworkReader:
                     ['qvm-run', '--pass-io', '--no-gui', '--no-autostart', self.qube, command],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, start_new_session=True)
-                tracker, buffer = NetworkTracker(), b''
+                tracker, buffer = self.tracker_factory(), b''
                 last = time.monotonic()
                 budget, budget_time = 8.0, last
                 while not self.stop_event.is_set():
                     if time.monotonic() - last > 5:
-                        raise TimeoutError('Network reporter stopped responding')
+                        raise TimeoutError('Guest reporter stopped responding')
                     ready, _, _ = select.select([proc.stdout], [], [], 0.25)
                     if not ready:
                         continue
@@ -197,20 +222,20 @@ class NetworkReader:
                         break
                     buffer += chunk
                     if len(buffer) > 8192:
-                        raise ValueError('Oversized network stream')
+                        raise ValueError('Oversized guest stream')
                     while b'\n' in buffer:
                         line, buffer = buffer.split(b'\n', 1)
                         now = time.monotonic()
                         budget = min(8.0, budget + (now - budget_time) * 4.0) - 1
                         budget_time = now
                         if budget < 0:
-                            raise ValueError('Network stream exceeds sample rate limit')
+                            raise ValueError('Guest stream exceeds sample rate limit')
                         rate = tracker.update(line)
                         last = time.monotonic()
                         with self.lock:
                             self.latest = (last, rate)
             except (OSError, ValueError, UnicodeError, TimeoutError):
-                logging.warning('Network source %s unavailable; retrying', self.qube)
+                logging.warning('Guest source %s unavailable; retrying', self.qube)
             finally:
                 with self.lock:
                     self.latest = None
@@ -231,10 +256,102 @@ class NetworkReader:
             self.stop_event.wait(3)
 
 
+class NetworkReader(GuestReader):
+    def __init__(self, qube='sys-net'):
+        super().__init__(qube, NETWORK_SCRIPT, NetworkTracker)
+
+    def rates(self):
+        return self.value()
+
+
+class MemoryReader(GuestReader):
+    def __init__(self, qube, domid):
+        super().__init__(qube, MEMORY_SCRIPT, lambda: MemoryTracker(domid))
+
+
+def qube_name(raw):
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode('ascii')
+        except UnicodeError:
+            return None
+    if not isinstance(raw, str) or not 1 <= len(raw) <= 31:
+        return None
+    if not raw[0].isascii() or not raw[0].isalpha():
+        return None
+    if not all(ch.isascii() and (ch.isalnum() or ch in '-_') for ch in raw):
+        return None
+    return raw
+
+
+class MemoryPool:
+    """One bounded stream per running guest; identity changes discard old data."""
+    def __init__(self, xs, reader_factory=MemoryReader, limit=128):
+        self.xs = xs
+        self.reader_factory = reader_factory
+        self.limit = limit
+        self.readers = {}
+        self.identities = {}
+        self.retired = []
+
+    def sync(self, domains):
+        # Device-model helper domains have no Qubes agent. Their allocation stays unknown.
+        stubdoms = set()
+        for domain in domains:
+            try:
+                stub = number(self.xs.read('', f"/local/domain/{domain['domid']}/image/device-model-domid"))
+                if stub is not None:
+                    stubdoms.add(stub)
+            except Exception:
+                continue
+        active = {}
+        for domain in domains:
+            domid = domain['domid']
+            if domid == 0 or domid in stubdoms or any(domain.get(flag, False) for flag in ('paused', 'shutdown', 'dying')):
+                continue
+            try:
+                name = qube_name(self.xs.read('', f'/local/domain/{domid}/name'))
+            except Exception:
+                continue
+            if name is not None:
+                active[domid] = (domid, tuple(domain.get('handle', ())), name)
+        for domid, key in list(self.identities.items()):
+            if active.get(domid) != key:
+                reader = self.readers.pop(domid)
+                reader.stop()
+                self.retired.append(reader)
+                del self.identities[domid]
+        self.retired = [r for r in self.retired if r.thread.is_alive()]
+        for domid, key in active.items():
+            if domid not in self.readers and len(self.readers) + len(self.retired) < self.limit:
+                reader = self.reader_factory(key[2], domid)
+                self.readers[domid], self.identities[domid] = reader, key
+                reader.start()
+
+    def used(self, domain):
+        domid = domain['domid']
+        key = self.identities.get(domid)
+        if key is None or key[1] != tuple(domain.get('handle', ())):
+            return None
+        return self.readers[domid].value()
+
+    def close(self):
+        readers = list(self.readers.values()) + self.retired
+        for reader in readers:
+            reader.stop()
+        deadline = time.monotonic() + 8
+        for reader in readers:
+            reader.thread.join(timeout=max(0, deadline - time.monotonic()))
+        self.readers.clear()
+        self.identities.clear()
+        self.retired.clear()
+
+
 class Collector:
-    def __init__(self, xc, xs, network=None):
+    def __init__(self, xc, xs, network=None, memory=None):
         self.xc, self.xs = xc, xs
         self.network = network
+        self.memory = memory
         self.cpu = CpuTracker()
 
     def sample(self, period):
@@ -244,6 +361,8 @@ class Collector:
         domains = [d for d in domains if not d.get("dying", False)]
         cpu = self.cpu.update(domains, time.monotonic(), host["nr_cpus"])
         total = int(host["total_memory"])
+        if self.memory:
+            self.memory.sync(domains)
         allocated = used = unknown = 0
         for domain in domains:
             allocation = int(domain["mem_kb"])
@@ -253,15 +372,10 @@ class Collector:
             usage = None
             if domain["domid"] == 0:
                 usage = min(dom0_used(), allocation)
-            else:
-                base = f"/local/domain/{int(domain['domid'])}/memory"
-                # One XenStore read transaction gives a consistent pair of keys.
-                tx = self.xs.transaction_start()
-                try:
-                    usage = physical_used(self.xs.read(tx, base + "/meminfo"),
-                                          self.xs.read(tx, base + "/swapinfo"), allocation)
-                finally:
-                    self.xs.transaction_end(tx, True)
+            elif self.memory:
+                reported = self.memory.used(domain)
+                if reported is not None:
+                    usage = min(reported, allocation)
             if usage is None:
                 unknown += allocation
             else:
@@ -296,6 +410,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("/run/multiload-qubes/metrics"))
     parser.add_argument("--network-qube", default="sys-net", help="Qube owning the physical network interfaces")
     parser.add_argument("--no-network", action="store_true")
+    parser.add_argument("--no-guest-memory", action="store_true", help="Show only dom0 usage; guest allocation stays unknown")
     args = parser.parse_args()
     if not args.network_qube or args.network_qube.startswith("-") or not all(x.isascii() and (x.isalnum() or x in "-_") for x in args.network_qube):
         parser.error("invalid network qube name")
@@ -314,6 +429,8 @@ def main():
     args.output.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO)
     network = None if args.no_network else NetworkReader(args.network_qube)
+    memory = None if args.no_guest_memory else MemoryPool(collector.xs)
+    collector.memory = memory
     def stop(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
@@ -332,6 +449,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if memory:
+            memory.close()
         if network:
             network.close()
 

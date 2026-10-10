@@ -12,8 +12,9 @@ or network access are needed to build. Slint is not required.
   wall time and host logical CPU count. 100% means all logical CPUs are busy.
   Includes dom0 and raw supporting domains once; this is scheduled domain CPU
   time, not a measurement of all hypervisor execution overhead.
-- **RAM used:** green (`#03964F`), resident non-cache usage reported by guests,
-  plus dom0, excluding swap.
+- **RAM used:** green (`#03964F`), `MemTotal − MemAvailable` sampled inside guests
+  and dom0. This estimates RAM in use after accounting for reclaimable cache and
+  excludes swap.
 - **RAM allocated spare:** lighter green (`#43D18D`), current Xen allocation with known usage minus
   known used RAM. This includes cache and buffers as well as free memory inside guests.
   This is current allocation, never configured `maxmem`.
@@ -72,7 +73,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.2.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.3.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -94,33 +95,50 @@ For a staged install without touching the system: `make install DESTDIR=/tmp/mq-
 
 A small Python service uses the Xen bindings already used by Qubes
 (`python3-xen`). Only the service has Xen privileges; the GUI never runs as root.
-It reads Xen counters and XenStore, and atomically publishes a bounded numeric
-snapshot at `/run/multiload-qubes/metrics`. For network counters, it runs a read-only
-Python sampling loop in sys-net over the existing Qubes command service. It does
-not alter balloon targets, change XenStore keys, or modify qmemman. Sampling defaults to 1s;
-the panel's refresh interval changes history sampling, not collector frequency.
+It reads Xen allocation/CPU counters and atomically publishes a bounded numeric
+snapshot at `/run/multiload-qubes/metrics`. For guest memory and sys-net network
+counters, it runs read-only sampling loops through the existing Qubes command
+service. It does not alter balloon targets, change XenStore keys or permissions,
+modify qmemman, or install files inside guests. Sampling defaults to 1s; the
+panel's refresh interval changes history sampling, not collector frequency.
 
-The Qubes memory writer computes:
+For dom0 and each reporting Linux guest:
 
 ```text
-memory/meminfo  = guest current RAM - free - buffers - cache + used swap
-memory/swapinfo = used swap
-resident used  = meminfo - swapinfo
+used RAM = MemTotal - MemAvailable
 ```
 
-Source: <https://github.com/QubesOS/qubes-linux-utils/blob/main/qmemman/meminfo-writer.c>.
-Dom0 uses the same resident formula from `/proc/meminfo`. This is a useful
-non-cache RAM estimate, not process RSS summed together and not exactly the modern
-`free` definition based on `MemAvailable`.
+`MemAvailable` accounts for memory the kernel estimates it can make available
+without swapping, including reclaimable cache. Used RAM is not a sum of process
+RSS, and swap usage is not added. This is the same calculation inside guests and
+dom0. This replaces the pre-0.3 XenStore `meminfo`/`swapinfo` calculation entirely:
+missing `swapinfo` and disabled Qubes memory balancing no longer prevent reporting.
+Usage can differ from older chart versions because the definition is now based
+on available memory instead of subtracting all buffers/cache.
 
-Reports are thresholded (often around 30 MiB), and memory/swap reports can update
-independently, so small changes may lag. Results are clamped to current allocation
-during balloon changes. **Older agents without `memory/swapinfo`, guests with
-memory reporting disabled (often PCI/device qubes), and unsupported guests are
-shown as unknown**. The collector does not assume zero swap or silently replace
-actual usage with allocation. A complete whole-machine used value requires both
-reports for every guest. Unchanged XenStore values cannot reliably be distinguished
-from a guest reporter that stopped; the tooltip describes them as guest reports.
+A persistent connection per running qube reads `/proc/meminfo` once per second.
+The guest must have the normal Qubes command agent, Python 3 and `xenstore-read`.
+Names come from dom0's XenStore domain names and are validated before use. Each
+report includes its guest domid; the collector also tracks Xen UUID handles and
+starts fresh connections when domain identities change. It never starts or
+unpauses qubes. Paused, stopped, unsupported or unreachable guests, internal
+stubdomains and guests missing required tools do not contribute a guessed usage.
+Their current allocation stays red. Readings expire after five seconds without
+a valid report; failure in one guest does not block CPU, network or other guests.
+
+During ballooning, used values are clamped to current Xen allocation because
+allocation and guest readings are not simultaneous. Light green is the remaining
+allocation of reporting guests; red is the full allocation of non-reporting guests.
+Xen/unattributed overhead is shown separately in the tooltip.
+
+Each monitored qube adds one Python sampling process inside that qube plus a
+persistent qvm-run process in dom0. This overhead scales with the number of guests;
+measure it on the target machine. Streams are bounded and rate-limited. At most
+128 memory connections are alive or shutting down at once; any additional guests
+remain unknown until capacity is available. The `--no-guest-memory` option disables
+all remote memory collection (dom0 remains measured, guest allocations become red).
+A `--once` snapshot intentionally starts no remote streams, so guest usage and
+network rates are unknown. The running service fills those in as connections warm up.
 
 ## Validation in dom0
 
@@ -134,12 +152,13 @@ measurements and dom0 packaging must still be validated on the target machine.
    `cat /run/multiload-qubes/metrics`.
 3. Compare physical total/free with `sudo xl info`, and current allocations with
    `sudo xl list`. The snapshot uses KiB; `xl list` commonly displays MiB.
-4. For a running test qube, inspect both XenStore memory keys from dom0 using its
-   domid: `sudo xenstore-read /local/domain/DOMID/memory/meminfo` and the corresponding
-   `swapinfo`. Missing keys explain red allocations.
-5. In that qube, compare `/proc/meminfo` using the formula above. Touch a bounded
-   allocation (e.g. 256 MiB), then release it; allow for writer thresholds.
-   Repeat with swap active to verify that swap is excluded.
+4. Check readings after allowing several seconds for guest connections to start.
+   In a test qube, compare `MemTotal` and `MemAvailable` in `/proc/meminfo` with
+   `free` and the formula above. XenStore swap keys are no longer used.
+5. Touch a bounded allocation (e.g. 256 MiB) in that qube, then release it. The
+   used value should respond after the next samples. Repeat with swap active;
+   swap should not be added to used RAM. Pause/resume a test qube, or restart it,
+   and verify that missing data is red and new readings recover automatically.
 6. Exercise CPU load, start/stop qubes, ballooning, vertical orientation, panel
    restart, Properties, persisted settings, and service stop/restart. Data should
    become unavailable within a few seconds of collector failure.

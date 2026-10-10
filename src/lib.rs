@@ -131,7 +131,7 @@ impl Graphs {
                 ),
                 None => "\nNetwork: unavailable or warming up".into(),
             };
-            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM reflects guest reports; updates may be thresholded.{}",
+            format!("{}CPU: {}\nKnown used RAM: {:.2} GiB\nUnknown usage (allocated): {:.2} GiB\nKnown allocated spare: {:.2} GiB\nTotal allocated RAM: {:.2} GiB\nPhysical total: {:.2} GiB\nXen/unattributed overhead: {:.2} GiB\nRAM used = MemTotal − MemAvailable; swap excluded.{}",
                 if demo { "DEMO — simulated data\n" } else { "" }, cpu, gib(s.used),
                 gib(s.unknown), gib(s.allocated - s.unknown - s.used),
                 gib(s.allocated), gib(s.total), gib(s.overhead), network)

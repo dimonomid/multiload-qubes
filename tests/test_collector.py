@@ -14,25 +14,19 @@ def domain(domid, cpu=0, memory=1000, handle=1):
 
 
 class Accounting(unittest.TestCase):
-    def test_swap_is_excluded(self):
-        self.assertEqual(c.physical_used(b"800", b"300", 1000), 500)
-
-    def test_missing_swap_is_unknown(self):
-        self.assertIsNone(c.physical_used(b"800", None, 1000))
+    def test_memory_available_excludes_reclaimable_cache(self):
+        self.assertEqual(c.memory_used(b"1000", b"400"), 600)
 
     def test_untrusted_reports(self):
         for value in [b"-1", b"NaN", b"1\n", b"9" * 100, b"\xff", "１２", None]:
-            self.assertIsNone(c.physical_used(value, b"0", 1000))
-
-    def test_threshold_skew_and_ballooning(self):
-        self.assertIsNone(c.physical_used(b"100", b"200", 1000))
-        self.assertEqual(c.physical_used(b"1500", b"0", 1000), 1000)
+            with self.assertRaises(ValueError):
+                c.memory_used(value, b"0")
 
     def test_dom0_excludes_cache_and_swap(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "meminfo"
-            path.write_text("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 200 kB\nSwapTotal: 500 kB\nSwapFree: 0 kB\n")
-            self.assertEqual(c.dom0_used(path), 650)
+            path.write_text("MemTotal: 1000 kB\nMemAvailable: 400 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 200 kB\nSwapTotal: 500 kB\nSwapFree: 0 kB\n")
+            self.assertEqual(c.dom0_used(path), 600)
 
     def test_cpu_normalization(self):
         cpu = c.CpuTracker()
@@ -83,7 +77,7 @@ class Integration(unittest.TestCase):
                 return (1234.5, 678.25)
         sample = c.Collector(FakeXc(), FakeXs(), Network()).sample(1).split()
         self.assertEqual(sample[-2:], ["1234.500", "678.250"])
-        self.assertEqual(sample[3:8], ["4000", "3000", "900", "1000", "100"])
+        self.assertEqual(sample[3:8], ["4000", "3000", "400", "2000", "100"])
 
     @patch.object(c, "dom0_used", return_value=400)
     def test_snapshot_accounts_for_unknown_domains(self, _):
@@ -91,16 +85,8 @@ class Integration(unittest.TestCase):
         collector = c.Collector(FakeXc(), xs)
         p = collector.sample(1).split()
         self.assertEqual(p[0], "MQ2")
-        self.assertEqual(p[2:], ["unknown", "4000", "3000", "900", "1000", "100", "1", "unknown", "unknown"])
-        self.assertEqual(xs.ended, 2)
-
-    @patch.object(c, "dom0_used", return_value=400)
-    def test_failed_read_aborts_transaction(self, _):
-        xs = FakeXs()
-        xs.read = lambda *_: (_ for _ in ()).throw(OSError("domain gone"))
-        with self.assertRaises(OSError):
-            c.Collector(FakeXc(), xs).sample(1)
-        self.assertEqual(xs.ended, 1)
+        self.assertEqual(p[2:], ["unknown", "4000", "3000", "400", "2000", "100", "1", "unknown", "unknown"])
+        self.assertEqual(xs.ended, 0)
 
     def test_atomic_publish_and_permissions(self):
         with tempfile.TemporaryDirectory() as tmp:
