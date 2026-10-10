@@ -96,7 +96,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.6.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.6.3-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -104,7 +104,9 @@ Add **Multiload for Qubes** through **Panel Preferences → Items → Add**. It 
 native panel item, not a notification-area icon. Right-click → Properties changes
 chart width (0 = square), refresh interval, and visible charts. Settings persist
 per panel instance. Hovering a chart shows only its own metrics; moving between
-charts switches the tooltip. Vertical panels stack the graphs and use the same
+charts switches the tooltip. Network and disk tooltips also state the speed
+represented by a full chart, using the combined in/out or read/write scale for
+the currently visible history. Resizing a chart updates that scale. Vertical panels stack the graphs and use the same
 per-chart tooltips. At least one chart stays enabled.
 
 To remove it, first remove the panel item, then:
@@ -332,7 +334,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.6.0, restart the collector and panel using the commands above.
+After installing v0.6.3, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid

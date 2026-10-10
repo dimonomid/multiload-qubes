@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.6.0
+Version:        0.6.3
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,15 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.3-1
+- Use concise scale labels and Physical disk activity wording in tooltips
+
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.2-1
+- Clarify that host disk activity includes qube I/O and dom0
+
+* Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.1-1
+- Show the current full-chart speed in network and disk tooltips
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.6.0-1
 - Add physical-disk read/write activity with multiload-ng colors and per-chart tooltips
 

@@ -9,7 +9,7 @@ typedef struct Graphs Graphs;
 extern Graphs *mq_new(void);
 extern void mq_free(Graphs *);
 extern void mq_tick(Graphs *, int);
-extern const char *mq_tooltip(const Graphs *, int);
+extern const char *mq_tooltip(Graphs *, int, int);
 extern void mq_draw(const Graphs *, cairo_t *, int, int, int, int, int, int, int, int);
 
 typedef struct {
@@ -78,7 +78,7 @@ static gboolean query_tooltip(GtkWidget *widget, gint x, gint y, gboolean keyboa
     int kind = chart_at(p, gtk_widget_get_allocated_width(widget),
                        gtk_widget_get_allocated_height(widget), x, y, &area);
     if (kind < 0) return FALSE;
-    gtk_tooltip_set_text(tooltip, mq_tooltip(p->graphs, kind));
+    gtk_tooltip_set_text(tooltip, mq_tooltip(p->graphs, kind, area.width));
     gtk_tooltip_set_tip_area(tooltip, &area);
     return TRUE;
 }
@@ -201,7 +201,7 @@ static void configure(XfcePanelPlugin *plugin, Plugin *p) {
 }
 static void about(XfcePanelPlugin *plugin, Plugin *p) {
     (void)plugin; (void)p;
-    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.6.0",
+    gtk_show_about_dialog(NULL, "program-name", "Multiload for Qubes", "version", "0.6.3",
         "comments", "CPU, RAM, network, swap and disk I/O graphs.\nPalette from multiload-ng.",
         "license-type", GTK_LICENSE_GPL_2_0, NULL);
 }

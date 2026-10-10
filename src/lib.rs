@@ -10,6 +10,7 @@ pub use multiload_qubes_snapshot::Snapshot;
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
     tooltips: [CString; 5],
+    tooltip_view: CString,
     tick: u64,
 }
 
@@ -18,6 +19,7 @@ impl Graphs {
         Self {
             history: VecDeque::new(),
             tooltips: tooltips(None, false),
+            tooltip_view: CString::default(),
             tick: 0,
         }
     }
@@ -94,7 +96,7 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [CString; 5] {
                     },
                 );
                 format!(
-                    "{rates}\nDevices: {}\nPhysical device traffic in dom0.",
+                    "{rates}\nDevices: {}\nPhysical disk activity",
                     disk.devices.join(", ")
                 )
             }
@@ -271,12 +273,33 @@ pub unsafe extern "C" fn mq_tick(g: *mut Graphs, demo: i32) {
     }
 }
 /// # Safety
-/// `g` must be live; the returned string remains valid until the next tick/free.
+/// `g` must be live and exclusively borrowed on the GTK thread. The returned
+/// string remains valid until the next tooltip query, tick or free.
 #[no_mangle]
-pub unsafe extern "C" fn mq_tooltip(g: *const Graphs, kind: i32) -> *const c_char {
-    g.as_ref()
-        .and_then(|g| g.tooltips.get(kind as usize))
-        .map_or(std::ptr::null(), |text| text.as_ptr())
+pub unsafe extern "C" fn mq_tooltip(g: *mut Graphs, kind: i32, chart_width: i32) -> *const c_char {
+    let Some(g) = g.as_mut() else {
+        return std::ptr::null();
+    };
+    let Some(text) = g.tooltips.get(kind as usize) else {
+        return std::ptr::null();
+    };
+    if matches!(kind, 2 | 4) && chart_width >= 4 {
+        let scale = g.io_scale((chart_width - 2) as usize, kind);
+        let combined = if kind == 2 {
+            "in + out"
+        } else {
+            "read + write"
+        };
+        g.tooltip_view = CString::new(format!(
+            "{}\nScale: {} ({combined})",
+            text.to_str().unwrap(),
+            rate_text(scale)
+        ))
+        .unwrap();
+        g.tooltip_view.as_ptr()
+    } else {
+        text.as_ptr()
+    }
 }
 /// # Safety
 /// `g` and `cr` must be live on the GTK thread. Cairo context is borrowed only.
@@ -408,7 +431,7 @@ mod tests {
             assert!(text.contains("DEMO"));
             // Verify that the native adapter's kind index selects the same string.
             assert_eq!(
-                unsafe { mq_tooltip(&graphs, kind as i32) },
+                unsafe { mq_tooltip(&mut graphs, kind as i32, 0) },
                 graphs.tooltips[kind].as_ptr()
             );
         }
@@ -431,8 +454,38 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("Swap: unavailable"));
-        assert!(unsafe { mq_tooltip(&graphs, -1) }.is_null());
-        assert!(unsafe { mq_tooltip(&graphs, 5) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, -1, 120) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, 5, 120) }.is_null());
+    }
+
+    #[test]
+    fn tooltip_scale_matches_visible_columns_and_updates_after_resize() {
+        fn text(g: &mut Graphs, kind: i32, width: i32) -> String {
+            unsafe { std::ffi::CStr::from_ptr(mq_tooltip(g, kind, width)) }
+                .to_str()
+                .unwrap()
+                .into()
+        }
+        let mut g = Graphs::new();
+        g.update(true);
+        let mut sample = g.history.back().unwrap().clone().unwrap();
+        g.history.clear();
+        sample.network = Some((1048576.0, 1048576.0));
+        sample.disk.as_mut().unwrap().rates = Some((2097152.0, 2097152.0));
+        g.history.push_back(Some(sample.clone()));
+        sample.network = Some((1024.0, 1024.0));
+        sample.disk.as_mut().unwrap().rates = Some((2048.0, 2048.0));
+        g.history.push_back(Some(sample.clone()));
+        g.history.push_back(Some(sample));
+        assert!(text(&mut g, 2, 5).contains("Scale: 2.00 MiB/s (in + out)"));
+        assert!(text(&mut g, 4, 5).contains("Scale: 4.00 MiB/s (read + write)"));
+        // A narrower graph no longer includes the oldest peak. Query-time sizing
+        // also covers vertical layouts and changes to which graphs are enabled.
+        assert!(text(&mut g, 2, 4).contains("Scale: 2.0 KiB/s"));
+        assert!(text(&mut g, 4, 4).contains("Scale: 4.0 KiB/s"));
+        assert!(!text(&mut g, 1, 5).contains("Scale:"));
+        g.history.clear();
+        assert!(text(&mut g, 2, 5).contains("Scale: 1.0 KiB/s"));
     }
 
     #[test]
