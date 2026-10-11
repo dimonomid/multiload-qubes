@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.8.1
+Version:        0.10.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,19 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.10.0-1
+- Add named custom theme files, draft protection and save/rename/delete controls
+- Restore flat Solarized Light and add Solarized Light Gradient as a separate preset
+
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.9.2-1
+- Use the custom CPU background gradient for all Solarized Light charts
+
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.9.1-1
+- Disable borders in every built-in appearance preset
+
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.9.0-1
+- Add Appearance preferences with presets, RGBA colors, transparency and border widths
+
 * Wed Oct 28 2026 Multiload for Qubes contributors - 0.8.1-1
 - Label individual-domain charts Per-qube CPU, Per-qube RAM and Per-qube swap in Properties
 

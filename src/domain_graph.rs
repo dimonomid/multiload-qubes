@@ -24,20 +24,6 @@ impl Metric {
             Self::Cpu => "Qube CPU",
         }
     }
-    fn line_color(self) -> u32 {
-        match self {
-            Self::Swap => 0x9C43D1,
-            Self::Ram => 0x43D18D,
-            Self::Cpu => 0x48BDE6,
-        }
-    }
-    fn fill(self) -> (u32, f64) {
-        match self {
-            Self::Swap => (0x9C43D1, 0.25),
-            Self::Ram => (0x03964F, 0.25),
-            Self::Cpu => (0x036F96, 0.25),
-        }
-    }
 }
 
 pub(crate) fn tooltip(usage: Option<&DomainUsageSnapshot>, metric: Metric) -> String {
@@ -151,17 +137,26 @@ fn traces<'a>(samples: &[Option<&'a Snapshot>], metric: Metric) -> BTreeMap<&'a 
 }
 
 // Stable tints of multiload-ng's swap purple or bright memory green.
-fn color(name: &str, metric: Metric) -> u32 {
+fn color(name: &str, base: u32, background: u32) -> u32 {
     let hash = name
         .bytes()
         .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     let tint = (hash % 6) as f64 * 0.09;
-    let base = metric.line_color();
-    [(base >> 16) & 255, (base >> 8) & 255, base & 255]
+    let target = if ((background >> 24) & 255)
+        + ((background >> 16) & 255)
+        + ((background >> 8) & 255)
+        > 384
+    {
+        0
+    } else {
+        255
+    };
+    let rgb = [(base >> 24) & 255, (base >> 16) & 255, (base >> 8) & 255]
         .into_iter()
         .fold(0, |rgb, c| {
-            (rgb << 8) | (c as f64 + (255 - c) as f64 * tint) as u32
-        })
+            (rgb << 8) | (c as f64 + (target as f64 - c as f64) * tint) as u32
+        });
+    (rgb << 8) | (base & 255)
 }
 
 // One-pixel strokes sit on pixel centers; both 0% and 100% stay inside the border.
@@ -175,6 +170,7 @@ impl Graphs {
         cr: *mut c_void,
         width: i32,
         height: i32,
+        palette: &Palette,
         metric: Metric,
     ) {
         let (w, h) = (width as f64, height as f64);
@@ -198,30 +194,18 @@ impl Graphs {
                 .filter(|v| *v > 0.0)
             {
                 let top = point_y(peak, h) - 0.5;
-                let (rgb, alpha) = metric.fill();
-                cairo_set_source_rgba(
-                    cr,
-                    ((rgb >> 16) & 255) as f64 / 255.0,
-                    ((rgb >> 8) & 255) as f64 / 255.0,
-                    (rgb & 255) as f64 / 255.0,
-                    alpha,
-                );
+                source(cr, palette.colors[4]);
                 cairo_rectangle(cr, left + i as f64, top, 1.0, h - 1.0 - top);
                 cairo_fill(cr);
             }
             if swap.is_none_or(|s| s.entries.len() < s.expected as usize) {
-                rect(cr, 0x777777, left + i as f64, h - 3.0, 1.0, 2.0);
+                rect(cr, palette.colors[6], left + i as f64, h - 3.0, 1.0, 2.0);
             }
         }
         cairo_set_line_width(cr, 1.0);
         for trace in traces(&samples, metric).values() {
-            let rgb = color(trace.name, metric);
-            cairo_set_source_rgb(
-                cr,
-                ((rgb >> 16) & 255) as f64 / 255.0,
-                ((rgb >> 8) & 255) as f64 / 255.0,
-                (rgb & 255) as f64 / 255.0,
-            );
+            let rgb = color(trace.name, palette.colors[3], palette.colors[1]);
+            source(cr, rgb);
             let mut drawing = false;
             for (i, percent) in trace.points.iter().enumerate() {
                 if let Some(percent) = percent {
@@ -301,7 +285,10 @@ mod tests {
             lines["new-incarnation"].points,
             vec![None, None, None, Some(60.0)]
         );
-        assert_eq!(color("dom0", Metric::Swap), color("dom0", Metric::Swap));
+        assert_eq!(
+            color("dom0", 0x9C43D1FF, 0x1F1326FF),
+            color("dom0", 0x9C43D1FF, 0x1F1326FF)
+        );
     }
     #[test]
     fn ram_uses_current_totals_and_breaks_lines_for_missing_reports_and_restarts() {

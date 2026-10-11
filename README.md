@@ -109,7 +109,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.8.1-1*.rpm
+sudo dnf install ./multiload-qubes-0.10.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -119,9 +119,47 @@ chart width (0 = square), refresh interval, and visible charts. Settings persist
 per panel instance. Hovering a chart shows only its own metrics; moving between
 charts switches the tooltip. Network and disk tooltips also state the speed
 represented by a full chart, using the combined in/out or read/write scale for
-the currently visible history. Resizing a chart updates that scale. Vertical panels stack the graphs and use the same
-per-chart tooltips. Properties labels the individual-domain charts `Per-qube CPU`,
-`Per-qube RAM` and `Per-qube swap`. At least one chart stays enabled.
+the currently visible history. Resizing a chart updates that scale. Vertical
+panels stack the graphs and use the same per-chart tooltips. Properties labels
+the individual-domain charts `Per-qube CPU`, `Per-qube RAM` and `Per-qube swap`.
+At least one chart stays enabled.
+
+Appearance is configured in its own Properties tab: choose Original, Tango,
+Solarized Dark, Solarized Light or Solarized Light Gradient, then customize each
+chart. Solarized Light has a flat opaque background; its Gradient variant fades
+from warm cream to transparency. All colors include
+opacity: background top/bottom, border, series, per-qube base lines and maximum
+fill, and missing-data marks. A transparent-background checkbox clears both
+background opacities. Border color and width are together; 0 px removes it. All presets use 0 px borders.
+Per-qube lines retain stable derived shades (darker against light backgrounds).
+The checkerboard preview uses simulated data; changes also preview on the panel.
+Editing a built-in or saved theme switches to **Custom draft**, keeping the
+source theme intact. **Save as…** creates a named custom theme; selecting an
+existing name asks before overwriting it. **Save changes** updates the source
+custom theme, also with confirmation. Built-ins and their names are protected.
+Saved custom themes can be renamed or deleted. Switching themes or resetting
+appearance while a draft is unsaved asks whether to discard it.
+
+**Apply** saves the panel appearance (including an unsaved draft and its source);
+**Cancel** restores the appearance from when Properties opened. Applying a draft
+does not save a named theme. Explicit theme saves, renames and deletes take
+effect immediately and are independent of Apply/Cancel. Deleting a theme keeps
+its current colors as a draft. Reset restores the original appearance settings.
+
+Each custom theme is stored in a separate GLib key file under
+`$XDG_CONFIG_HOME/multiload-qubes/themes/` (normally
+`~/.config/multiload-qubes/themes/` in dom0). Files use generated UUID filenames
+with a `.theme` extension, so display names may contain spaces, Unicode or `/`.
+The `[Theme]` section contains `Version=1` and `Name`. Each chart has a section
+(`CPU`, `RAM`, `Network`, `Swap`, `Disk`, `PerQubeRAM`, `PerQubeCPU`) containing
+`Border`, `BackgroundTop`, `BackgroundBottom`, `Series1`, `Series2`, `Series3`,
+`Missing` as `#RRGGBBAA`, and `BorderWidth` as an integer from 0 to 16.
+Theme writes use atomic replacement; invalid/incomplete files, unknown versions
+and duplicate names are skipped with a notice in Properties. Theme lists reload
+when Properties opens. Theme files are shared by panel instances for the same
+user. Import/export buttons are not included; copying a valid `.theme` file into
+this directory makes it available next time Properties opens.
+
 
 To remove it, first remove the panel item, then:
 
@@ -329,7 +367,7 @@ budget. A `--once` snapshot cannot derive per-qube CPU rates from one sample.
 Xen scheduling weights, affinity and caps are not changed; the chart does not
 measure runnable time denied by Xen or work performed in dom0 on a qube's behalf.
 
-After installing v0.8.1, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.10.0, restart the collector and run `xfce4-panel -r`. Compare a
 CPU-loaded qube with its online vCPU count in `xl list`; a four-vCPU qube at 100%
 contributes 25% to a sixteen-logical-CPU host. Live Xen reporting still needs
 checking in dom0; fixtures cover normalization, online counts, resets, restart,
@@ -354,7 +392,7 @@ allocation and unknown usage. Guest totals are not replaced with configured
 maximum memory or Xen allocation. Reclaimable memory is accounted for through
 `MemAvailable`; swap is excluded.
 
-After installing v0.8.1, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.10.0, restart the collector and run `xfce4-panel -r`. Compare a
 qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
 its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
 Qube RAM needs MQ5 data from the updated collector.
@@ -413,7 +451,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.8.1, restart the collector and panel using the commands above.
+After installing v0.10.0, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid
@@ -461,4 +499,4 @@ messages are suppressed across retries; recovery is still logged once.
 For example: `Guest metrics [dev RAM] unavailable: guest stream closed; command
 exit status 127; stderr: python3: command not found; retrying in 3.0s`.
 
-Out of scope: per-qube controls, a separate tray frontend, and themes.
+Out of scope: per-qube controls, a separate tray frontend, and theme import/export buttons.

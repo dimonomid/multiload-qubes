@@ -1,6 +1,9 @@
 //! Metrics and Cairo renderer. GTK/XFCE ownership stays in the small C adapter.
 mod domain_graph;
+mod palette;
 use domain_graph::Metric;
+use palette::source;
+use palette::Palette;
 
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CString};
@@ -13,6 +16,7 @@ pub struct Graphs {
     tooltips: [CString; 7],
     tooltip_view: CString,
     tick: u64,
+    palette: [Palette; 7],
 }
 
 impl Graphs {
@@ -22,6 +26,9 @@ impl Graphs {
             tooltips: tooltips(None, false),
             tooltip_view: CString::default(),
             tick: 0,
+            palette: std::array::from_fn(|kind| {
+                Palette::preset(palette::BuiltinTheme::Original, kind)
+            }),
         }
     }
     fn update(&mut self, demo: bool) {
@@ -149,7 +156,6 @@ extern "C" {
     fn cairo_move_to(cr: *mut c_void, x: f64, y: f64);
     fn cairo_line_to(cr: *mut c_void, x: f64, y: f64);
     fn cairo_stroke(cr: *mut c_void);
-    fn cairo_set_source_rgb(cr: *mut c_void, r: f64, g: f64, b: f64);
     fn cairo_rectangle(cr: *mut c_void, x: f64, y: f64, w: f64, h: f64);
     fn cairo_fill(cr: *mut c_void);
     fn cairo_save(cr: *mut c_void);
@@ -159,12 +165,7 @@ extern "C" {
 }
 
 unsafe fn rect(cr: *mut c_void, color: u32, x: f64, y: f64, w: f64, h: f64) {
-    cairo_set_source_rgb(
-        cr,
-        ((color >> 16) & 255) as f64 / 255.0,
-        ((color >> 8) & 255) as f64 / 255.0,
-        (color & 255) as f64 / 255.0,
-    );
+    source(cr, color);
     cairo_rectangle(cr, x, y, w, h);
     cairo_fill(cr);
 }
@@ -189,33 +190,53 @@ impl Graphs {
         2f64.powf(peak.log2().ceil())
     }
     unsafe fn chart(&self, cr: *mut c_void, width: i32, height: i32, kind: i32) {
+        let palette = &self.palette[kind as usize];
+        let border = palette
+            .border
+            .min(((width.min(height) - 2) / 2).max(0) as u32) as i32;
         let (w, h) = (width as f64, height as f64);
-        let (border, top) = match kind {
-            1 | 5 => (0x008042, 0x13261D),
-            2 => (0x807100, 0x262413),
-            3 => (0x510080, 0x1F1326),
-            4 => (0x804200, 0x261D13),
-            _ => (0x005D80, 0x132126),
-        };
-        rect(cr, border, 0.0, 0.0, w, h);
+        let b = border as f64;
+        rect(cr, palette.colors[0], 0.0, 0.0, w, b);
+        rect(cr, palette.colors[0], 0.0, h - b, w, b);
+        rect(cr, palette.colors[0], 0.0, b, b, h - 2.0 * b);
+        rect(cr, palette.colors[0], w - b, b, b, h - 2.0 * b);
+        // Use the existing one-pixel-inset plot coordinates with any border width.
+        let width = width - 2 * border + 2;
+        let height = height - 2 * border + 2;
+        let (w, h) = (width as f64, height as f64);
+        cairo_save(cr);
+        cairo_translate(cr, b - 1.0, b - 1.0);
+        cairo_rectangle(cr, 1.0, 1.0, w - 2.0, h - 2.0);
+        cairo_clip(cr);
+        cairo_set_antialias(cr, 1);
         for y in 1..height - 1 {
-            let scale = 1.0 - y as f64 / (h - 1.0);
-            let c = (((((top >> 16) & 255) as f64 * scale) as u32) << 16)
-                | (((((top >> 8) & 255) as f64 * scale) as u32) << 8)
-                | (((top & 255) as f64 * scale) as u32);
-            rect(cr, c, 1.0, y as f64, w - 2.0, 1.0);
+            let t = if height > 3 {
+                (y - 1) as f64 / (h - 3.0)
+            } else {
+                0.0
+            };
+            rect(
+                cr,
+                palette::mix(palette.colors[1], palette.colors[2], t),
+                1.0,
+                y as f64,
+                w - 2.0,
+                1.0,
+            );
         }
         if matches!(kind, 3 | 5 | 6) {
             self.domain_chart(
                 cr,
                 width,
                 height,
+                palette,
                 match kind {
                     6 => Metric::Cpu,
                     5 => Metric::Ram,
                     _ => Metric::Swap,
                 },
             );
+            cairo_restore(cr);
             return;
         }
         let n = self.history.len().min((width - 2) as usize);
@@ -227,17 +248,29 @@ impl Graphs {
                     let used = s.used as f64 / s.total as f64 * (h - 2.0);
                     let allocated = s.allocated as f64 / s.total as f64 * (h - 2.0);
                     let unknown = s.unknown as f64 / s.total as f64 * (h - 2.0);
-                    rect(cr, 0x43D18D, x, h - 1.0 - allocated, 1.0, allocated);
+                    // Draw disjoint stacks so translucent colors do not overlap.
+                    rect(
+                        cr,
+                        palette.colors[4],
+                        x,
+                        h - 1.0 - allocated + unknown,
+                        1.0,
+                        (allocated - unknown - used).max(0.0),
+                    );
                     // Unknown allocation is red, never represented as measured unused RAM.
                     if unknown > 0.0 {
-                        rect(cr, 0xD14343, x, h - 1.0 - allocated, 1.0, unknown);
+                        rect(cr, palette.colors[5], x, h - 1.0 - allocated, 1.0, unknown);
                     }
-                    rect(cr, 0x03964F, x, h - 1.0 - used, 1.0, used);
+                    rect(cr, palette.colors[3], x, h - 1.0 - used, 1.0, used);
                 } else if kind == 2 || kind == 4 {
                     let (rates, read_color, write_color) = if kind == 4 {
-                        (s.disk.as_ref().and_then(|d| d.rates), 0xED7A00, 0xFFAB73)
+                        (
+                            s.disk.as_ref().and_then(|d| d.rates),
+                            palette.colors[3],
+                            palette.colors[4],
+                        )
                     } else {
-                        (s.network, 0xE2CC05, 0x696018)
+                        (s.network, palette.colors[3], palette.colors[4])
                     };
                     if let Some((rx, tx)) = rates {
                         let incoming = rx / io_scale * (h - 2.0);
@@ -252,16 +285,17 @@ impl Graphs {
                             outgoing,
                         );
                     } else {
-                        rect(cr, 0x777777, x, h - 3.0, 1.0, 2.0);
+                        rect(cr, palette.colors[6], x, h - 3.0, 1.0, 2.0);
                     }
                 } else if let Some(cpu) = s.cpu {
                     let v = cpu / 100.0 * (h - 2.0);
-                    rect(cr, 0x036F96, x, h - 1.0 - v, 1.0, v);
+                    rect(cr, palette.colors[3], x, h - 1.0 - v, 1.0, v);
                 }
             } else {
-                rect(cr, 0x777777, x, h - 3.0, 1.0, 2.0);
+                rect(cr, palette.colors[6], x, h - 3.0, 1.0, 2.0);
             }
         }
+        cairo_restore(cr);
     }
 }
 
@@ -291,7 +325,12 @@ pub unsafe extern "C" fn mq_tick(g: *mut Graphs, demo: i32) {
 /// `g` must be live and exclusively borrowed on the GTK thread. The returned
 /// string remains valid until the next tooltip query, tick or free.
 #[no_mangle]
-pub unsafe extern "C" fn mq_tooltip(g: *mut Graphs, kind: i32, chart_width: i32) -> *const c_char {
+pub unsafe extern "C" fn mq_tooltip(
+    g: *mut Graphs,
+    kind: i32,
+    chart_width: i32,
+    chart_height: i32,
+) -> *const c_char {
     let Some(g) = g.as_mut() else {
         return std::ptr::null();
     };
@@ -299,7 +338,10 @@ pub unsafe extern "C" fn mq_tooltip(g: *mut Graphs, kind: i32, chart_width: i32)
         return std::ptr::null();
     };
     if matches!(kind, 2 | 4) && chart_width >= 4 {
-        let scale = g.io_scale((chart_width - 2) as usize, kind);
+        let border = g.palette[kind as usize]
+            .border
+            .min(((chart_width.min(chart_height.max(4)) - 2) / 2) as u32);
+        let scale = g.io_scale((chart_width - 2 * border as i32) as usize, kind);
         let combined = if kind == 2 {
             "in + out"
         } else {
@@ -461,7 +503,7 @@ mod tests {
             assert!(text.contains("DEMO"));
             // Verify that the native adapter's kind index selects the same string.
             assert_eq!(
-                unsafe { mq_tooltip(&mut graphs, kind as i32, 0) },
+                unsafe { mq_tooltip(&mut graphs, kind as i32, 0, 0) },
                 graphs.tooltips[kind].as_ptr()
             );
         }
@@ -489,19 +531,21 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("Swap: unavailable"));
-        assert!(unsafe { mq_tooltip(&mut graphs, -1, 120) }.is_null());
-        assert!(unsafe { mq_tooltip(&mut graphs, 7, 120) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, -1, 120, 48) }.is_null());
+        assert!(unsafe { mq_tooltip(&mut graphs, 7, 120, 48) }.is_null());
     }
 
     #[test]
     fn tooltip_scale_matches_visible_columns_and_updates_after_resize() {
         fn text(g: &mut Graphs, kind: i32, width: i32) -> String {
-            unsafe { std::ffi::CStr::from_ptr(mq_tooltip(g, kind, width)) }
+            unsafe { std::ffi::CStr::from_ptr(mq_tooltip(g, kind, width, 48)) }
                 .to_str()
                 .unwrap()
                 .into()
         }
         let mut g = Graphs::new();
+        g.palette[2].border = 1;
+        g.palette[4].border = 1;
         g.update(true);
         let mut sample = g.history.back().unwrap().clone().unwrap();
         g.history.clear();
@@ -519,6 +563,14 @@ mod tests {
         assert!(text(&mut g, 2, 4).contains("Scale: 2.0 KiB/s"));
         assert!(text(&mut g, 4, 4).contains("Scale: 4.0 KiB/s"));
         assert!(!text(&mut g, 1, 5).contains("Scale:"));
+        // Border changes alter the visible history and therefore the scale.
+        g.palette[2].border = 0;
+        assert!(text(&mut g, 2, 4).contains("Scale: 2.00 MiB/s"));
+        g.palette[2].border = 16;
+        let scale = unsafe { std::ffi::CStr::from_ptr(mq_tooltip(&mut g, 2, 5, 4)) };
+        // Clamp the border using both dimensions, just as the renderer does.
+        assert!(scale.to_str().unwrap().contains("Scale: 2.00 MiB/s"));
+
         g.history.clear();
         assert!(text(&mut g, 2, 5).contains("Scale: 1.0 KiB/s"));
     }
