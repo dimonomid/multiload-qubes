@@ -19,6 +19,10 @@ use std::{cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
 struct Args {
     #[arg(long, value_name = "PNG", conflicts_with_all = ["self_test", "preferences"])]
     render: Option<PathBuf>,
+    #[arg(long, requires = "render", value_parser = clap::value_parser!(i32).range(28..=16384))]
+    render_width: Option<i32>,
+    #[arg(long, requires = "render", value_parser = clap::value_parser!(i32).range(4..=4096))]
+    render_height: Option<i32>,
     #[arg(value_name = "THEME", requires = "render")]
     theme: Option<u32>,
     #[arg(long, conflicts_with = "preferences")]
@@ -34,14 +38,18 @@ pub fn run() -> ExitCode {
             .theme
             .and_then(BuiltinTheme::from_id)
             .unwrap_or(BuiltinTheme::Original);
-        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 840, 64).unwrap();
+        let (width, height) = (
+            args.render_width.unwrap_or(840),
+            args.render_height.unwrap_or(64),
+        );
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).unwrap();
         let context = cairo::Context::new(&surface).unwrap();
         let mut graphs = crate::Graphs::new();
         graphs.palette = Appearance::builtin(theme).palettes;
         for _ in 0..400 {
             graphs.update(true);
         }
-        super::draw_graphs(&graphs, &context, 840, 64, [true; 7], false);
+        super::draw_graphs(&graphs, &context, width, height, [true; 7], false);
         return match std::fs::File::create(path)
             .map_err(|e| e.to_string())
             .and_then(|mut file| surface.write_to_png(&mut file).map_err(|e| e.to_string()))
@@ -191,26 +199,26 @@ fn self_test() {
     let panel = Panel::new(None, true);
     let prefs = prefs(&panel);
     assert_eq!(prefs.notebook.n_pages(), 2);
-    prefs.select("4");
+    prefs.select("1");
     prefs.select("1000");
     assert!(!prefs.editor.borrow().unsaved());
-    prefs.select("3"); // No discard dialog for an untouched draft.
+    prefs.select("4"); // No discard dialog for an untouched draft.
     assert_eq!(prefs.editor.borrow().palettes[0].colors[1], 0xFDF6E3FF);
-    prefs.select("4");
+    prefs.select("1");
     assert_eq!(prefs.editor.borrow().palettes[0].colors[2], 0xFDF6E300);
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     prefs.border.set_value(0.);
     assert!(!prefs.editor.borrow().unsaved());
-    prefs.select("3"); // Undoing edits removes the warning too.
-    prefs.select("4");
+    prefs.select("4"); // Undoing edits removes the warning too.
+    prefs.select("1");
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     let keep = prompts(vec![message(
         "Your changes aren't saved. Discard them?",
         false,
     )]);
-    prefs.theme.set_active_id(Some("1"));
+    prefs.theme.set_active_id(Some("2"));
     assert_eq!(keep.get(), 1);
     assert!(prefs.editor.borrow().unsaved());
     assert_eq!(prefs.editor.borrow().palettes[0].border, 2);
@@ -326,7 +334,7 @@ fn self_test() {
     assert!(!loaded.enabled[0]);
     assert_eq!(
         ThemeStore::load().0.find(&id).unwrap().palettes[5].colors[3],
-        Appearance::builtin(BuiltinTheme::SolarizedLightGradient).palettes[5].colors[3]
+        Appearance::builtin(BuiltinTheme::LightGradient).palettes[5].colors[3]
     );
     let committed = panel.config.borrow().clone();
     let prefs = super::preview::prefs(&panel);
@@ -334,7 +342,7 @@ fn self_test() {
         "Your changes aren't saved. Discard them?",
         true,
     )]);
-    prefs.theme.set_active_id(Some("1"));
+    prefs.theme.set_active_id(Some("2"));
     assert_eq!(discard.get(), 1);
     prefs.dialog.response(ResponseType::Cancel);
     assert_eq!(*panel.config.borrow(), committed);
@@ -355,7 +363,7 @@ fn self_test() {
         let owner = panel.clone();
         glib::idle_add_local_once(move || owner.shutdown());
         if action == 0 {
-            prefs.theme.set_active_id(Some("1"));
+            prefs.theme.set_active_id(Some("2"));
         } else {
             prefs.save_as.emit_clicked();
         }

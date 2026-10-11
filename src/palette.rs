@@ -1,24 +1,24 @@
 //! Renderer palettes with packed RRGGBBAA colors.
 
-// Stable built-in IDs persisted in panel settings.
+// Built-in IDs persisted in panel settings.
 // Custom draft uses ID 1000 and is not a built-in palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum BuiltinTheme {
     Original = 0,
-    Tango = 1,
-    SolarizedDark = 2,
-    SolarizedLight = 3,
-    SolarizedLightGradient = 4,
+    LightGradient = 1,
+    Tango = 2,
+    SolarizedDark = 3,
+    SolarizedLight = 4,
 }
 impl BuiltinTheme {
     pub(super) fn from_id(id: u32) -> Option<Self> {
         match id {
             0 => Some(Self::Original),
-            1 => Some(Self::Tango),
-            2 => Some(Self::SolarizedDark),
-            3 => Some(Self::SolarizedLight),
-            4 => Some(Self::SolarizedLightGradient),
+            1 => Some(Self::LightGradient),
+            2 => Some(Self::Tango),
+            3 => Some(Self::SolarizedDark),
+            4 => Some(Self::SolarizedLight),
             _ => None,
         }
     }
@@ -31,6 +31,9 @@ pub(super) struct Palette {
 }
 impl Palette {
     pub fn preset(preset: BuiltinTheme, kind: usize) -> Self {
+        if preset == BuiltinTheme::LightGradient {
+            return Self::light_gradient(kind);
+        }
         let (border, top, first, second, third) = match kind {
             1 => (0x008042, 0x13261D, 0x03964F, 0x43D18D, 0xD14343),
             5 => (0x008042, 0x13261D, 0x43D18D, 0x03964F, 0),
@@ -54,16 +57,21 @@ impl Palette {
                     0x002B36, 0x586E75, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4, 0xDC322F,
                     0xA8B86B,
                 ),
-                BuiltinTheme::SolarizedLight | BuiltinTheme::SolarizedLightGradient => (
+                BuiltinTheme::SolarizedLight => (
                     0xFDF6E3, 0x93A1A1, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4, 0xDC322F,
                     0xCBD3A1,
                 ),
-                BuiltinTheme::Original => unreachable!("original palette is handled above"),
+                BuiltinTheme::Original | BuiltinTheme::LightGradient => {
+                    unreachable!("handled above")
+                }
             };
             p.colors[0] = (edge << 8) | 255;
             p.colors[1] = (background << 8) | 255;
             p.colors[2] = p.colors[1];
+            let light = preset == BuiltinTheme::SolarizedLight;
             let (a, b) = match kind {
+                2 if light => (0xB89C00, 0x696018),
+                4 if light => (0x2AA198, 0x16776F),
                 1 => (green, spare),
                 5 => (green, green),
                 2 => (yellow, orange),
@@ -76,14 +84,28 @@ impl Palette {
             p.colors[5] = (red << 8) | 255;
             p.colors[6] = (edge << 8) | 255;
         }
-        if preset == BuiltinTheme::SolarizedLightGradient {
-            p.colors[1] = 0xF3E5C0FF;
-            p.colors[2] = 0xFDF6E300;
-        }
         if matches!(kind, 3 | 5 | 6) {
             p.colors[4] = (p.colors[4] & !255) | 64;
         }
         p
+    }
+    fn light_gradient(kind: usize) -> Self {
+        // Keep the per-chart fill opacities rather than imposing a shared default.
+        let (first, second) = match kind {
+            1 => (0x26A269FF, 0x8FF0A4FF), // RAM
+            2 => (0xE5A50AFF, 0xFF7800FF), // Network
+            3 => (0x6C71C4FF, 0x6C71C440), // Swap
+            4 => (0x2AA198FF, 0x16776FFF), // Disk
+            5 => (0x26A269FF, 0x9DD52F61), // PerQubeRAM
+            6 => (0x268BD2FF, 0x268BD240), // PerQubeCPU
+            _ => (0x268BD2FF, 0x268BD2FF), // CPU
+        };
+        Self {
+            colors: [
+                0x93A1A1FF, 0xF3E5C0FF, 0xFDF6E300, first, second, 0xDC322FFF, 0x93A1A1FF,
+            ],
+            border: 0,
+        }
     }
 }
 

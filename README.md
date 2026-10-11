@@ -155,10 +155,12 @@ panels stack the graphs and use the same per-chart tooltips. Properties labels
 the individual-domain charts `Per-qube CPU`, `Per-qube RAM` and `Per-qube swap`.
 At least one chart stays enabled.
 
-Appearance is configured in its own Properties tab: choose Original, Tango,
-Solarized Dark, Solarized Light or Solarized Light Gradient, then customize each
-chart. Solarized Light has a flat opaque background; its Gradient variant fades
-from warm cream to transparency. All colors include
+Appearance is configured in its own Properties tab: choose Original, Light
+Gradient, Tango, Solarized Dark or Solarized Light, then customize each chart.
+Solarized Light has a flat opaque background with mustard/olive network and
+cyan/teal disk colors. Light Gradient has a warm cream background fading to transparency, green RAM,
+yellow/orange network,
+cyan/teal disk, and the custom per-qube fills. All colors include
 opacity: background top/bottom, border, series, per-qube base lines and maximum
 fill, and missing-data marks. A transparent-background checkbox clears both
 background opacities. Border color and width are together; 0 px removes it. All presets use 0 px borders.

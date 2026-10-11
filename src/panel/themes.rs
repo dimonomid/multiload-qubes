@@ -7,13 +7,10 @@ use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::PathBuf};
 
 pub const BUILTINS: [(BuiltinTheme, &str); 5] = [
     (BuiltinTheme::Original, "Original"),
+    (BuiltinTheme::LightGradient, "Light Gradient"),
     (BuiltinTheme::Tango, "Tango"),
     (BuiltinTheme::SolarizedDark, "Solarized Dark"),
     (BuiltinTheme::SolarizedLight, "Solarized Light"),
-    (
-        BuiltinTheme::SolarizedLightGradient,
-        "Solarized Light Gradient",
-    ),
 ];
 const GROUPS: [&str; 7] = [
     "CPU",
@@ -255,8 +252,7 @@ mod tests {
         let (mut store, errors) = ThemeStore::load_from(tmp.0.join("themes"));
         assert!(errors.is_empty());
         let mut palettes =
-            super::super::config::Appearance::builtin(BuiltinTheme::SolarizedLightGradient)
-                .palettes;
+            super::super::config::Appearance::builtin(BuiltinTheme::LightGradient).palettes;
         palettes[0].colors[3] = 0x33669980;
         let id = store.write(None, "Cream / Ω", palettes).unwrap();
         let (loaded, errors) = ThemeStore::load_from(store.dir.clone());

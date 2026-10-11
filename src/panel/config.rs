@@ -239,7 +239,7 @@ mod tests {
     }
     #[test]
     fn draft_is_dirty_only_while_palette_differs_from_its_baseline() {
-        let mut appearance = Appearance::builtin(BuiltinTheme::SolarizedLightGradient);
+        let mut appearance = Appearance::builtin(BuiltinTheme::LightGradient);
         appearance.edit();
         assert!(!appearance.unsaved());
         appearance.palettes[5].colors[3] ^= 255; // Opacity counts as an edit.
