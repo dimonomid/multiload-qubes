@@ -10,3 +10,6 @@ mod panel;
 
 #[cfg(feature = "panel")]
 pub use graphs::Graphs;
+
+#[cfg(feature = "panel")]
+pub use panel::preview::run as run_preview;

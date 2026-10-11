@@ -56,8 +56,3 @@ static void construct(XfcePanelPlugin *plugin) {
     g_signal_connect(plugin, "about", G_CALLBACK(about), NULL);
 }
 XFCE_PANEL_PLUGIN_REGISTER(construct)
-
-#ifdef PREVIEW
-extern int mq_preview_main(int, char **);
-int main(int argc, char **argv) { return mq_preview_main(argc, argv); }
-#endif

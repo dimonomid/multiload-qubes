@@ -6,31 +6,32 @@ use super::{
     Panel,
 };
 use crate::palette::BuiltinTheme;
+use clap::Parser;
 use gtk::prelude::*;
-use std::{
-    cell::Cell,
-    ffi::{c_char, CStr},
-    rc::Rc,
-};
+use std::{cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
 
-/// # Safety
-/// `argv` contains `argc` valid NUL-terminated arguments, on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_preview_main(argc: i32, argv: *const *const c_char) -> i32 {
-    let args: Vec<String> = (0..argc)
-        .map(|i| {
-            CStr::from_ptr(*argv.add(i as usize))
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    if args.get(1).is_some_and(|s| s == "--render") {
-        let Some(path) = args.get(2) else {
-            return 1;
-        };
+#[derive(Parser)]
+#[command(
+    name = "multiload-qubes-preview",
+    version,
+    about = "Simulated Multiload for Qubes charts and Preferences"
+)]
+struct Args {
+    #[arg(long, value_name = "PNG", conflicts_with_all = ["self_test", "preferences"])]
+    render: Option<PathBuf>,
+    #[arg(value_name = "THEME", requires = "render")]
+    theme: Option<u32>,
+    #[arg(long, conflicts_with = "preferences")]
+    self_test: bool,
+    #[arg(long)]
+    preferences: bool,
+}
+
+pub fn run() -> ExitCode {
+    let args = Args::parse();
+    if let Some(path) = args.render {
         let theme = args
-            .get(3)
-            .and_then(|s| s.parse().ok())
+            .theme
             .and_then(BuiltinTheme::from_id)
             .unwrap_or(BuiltinTheme::Original);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 840, 64).unwrap();
@@ -45,20 +46,20 @@ pub unsafe extern "C" fn mq_preview_main(argc: i32, argv: *const *const c_char) 
             .map_err(|e| e.to_string())
             .and_then(|mut file| surface.write_to_png(&mut file).map_err(|e| e.to_string()))
         {
-            Ok(()) => 0,
+            Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("Cannot write preview: {e}");
-                1
+                ExitCode::FAILURE
             }
         };
     }
     if let Err(e) = gtk::init() {
         eprintln!("Cannot initialize GTK: {e}");
-        return 1;
+        return ExitCode::FAILURE;
     }
-    if args.get(1).is_some_and(|s| s == "--self-test") {
+    if args.self_test {
         self_test();
-        return 0;
+        return ExitCode::SUCCESS;
     }
     let panel = Panel::new(None, true);
     panel.config.borrow_mut().width = 96;
@@ -71,7 +72,7 @@ pub unsafe extern "C" fn mq_preview_main(argc: i32, argv: *const *const c_char) 
     window.add(&panel.area);
     window.connect_destroy(|_| gtk::main_quit());
     window.show_all();
-    if args.iter().any(|s| s == "--preferences") {
+    if args.preferences {
         panel.configure();
     }
     if let Ok(seconds) = std::env::var("MQ_PREVIEW_SECONDS")
@@ -85,7 +86,7 @@ pub unsafe extern "C" fn mq_preview_main(argc: i32, argv: *const *const c_char) 
     }
     gtk::main();
     panel.shutdown();
-    0
+    ExitCode::SUCCESS
 }
 #[derive(Clone)]
 enum Prompt {

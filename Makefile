@@ -11,13 +11,14 @@ CPPFLAGS += $(shell pkg-config --cflags $(PKGS))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) -ldl -lpthread -lm
 RUSTLIB = build/libmultiload_qubes.a
 COLLECTOR = target/release/multiload-qubes-collector
+PREVIEW = target/release/multiload-qubes-preview
 
 .PHONY: all test check gui-test install rpm clean
 all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR)
 
-$(RUSTLIB) $(COLLECTOR) &: Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
+$(RUSTLIB) $(COLLECTOR) $(PREVIEW) &: Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
 	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector
-	$(CARGO) build --release --offline --features panel --lib
+	$(CARGO) build --release --offline --features panel --lib --bin multiload-qubes-preview
 	cp target/release/libmultiload_qubes.a $(RUSTLIB)
 
 build:
@@ -26,8 +27,8 @@ build:
 build/libmultiload-qubes.so: native/plugin.c $(RUSTLIB) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Wall -Wextra -Werror -fPIC -shared $(LDFLAGS) -o $@ $< $(RUSTLIB) $(LDLIBS) -Wl,-z,defs
 
-build/multiload-qubes-preview: native/plugin.c $(RUSTLIB) | build
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Wall -Wextra -Werror -DPREVIEW $(LDFLAGS) -o $@ $< $(RUSTLIB) $(LDLIBS)
+build/multiload-qubes-preview: $(PREVIEW) | build
+	cp $< $@
 
 build/panel-smoke: tests/panel_smoke.c | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Wall -Wextra -Werror $(LDFLAGS) -o $@ $< $(LDLIBS)

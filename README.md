@@ -82,7 +82,8 @@ cargo build --release --offline --no-default-features --bin multiload-qubes-coll
 `make` builds the collector first, then the panel library with `--features panel`,
 and keeps a separate panel archive in `build/` for the C adapter to link. This
 prevents standalone Cargo builds from replacing the panel archive with a library
-that has GTK disabled. The UI modules live in `src/panel/`: preferences, config,
+that has GTK disabled. The standalone preview is a Cargo binary (`src/bin/preview.rs`); it links no
+XFCE adapter. The UI modules live in `src/panel/`: preferences, config,
 theme files, runtime and preview/integration checks. Graph history, Rust-string
 tooltips and typed Cairo drawing live in `src/graphs/`. The panel calls that Rust
 API directly; there is no separate graph C API or raw Cairo-pointer interface.

@@ -25,6 +25,11 @@ crate-type = ["staticlib", "rlib"]
 name = "multiload-qubes-collector"
 path = "src/bin/collector.rs"
 
+[[bin]]
+name = "multiload-qubes-preview"
+path = "src/bin/preview.rs"
+required-features = ["panel"]
+
 [profile.release]
 panic = "abort"
 lto = true

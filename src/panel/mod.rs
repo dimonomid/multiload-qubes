@@ -1,7 +1,7 @@
 //! GTK3 panel runtime. Only XFCE-specific calls cross the small native adapter.
 mod config;
 mod preferences;
-mod preview;
+pub(crate) mod preview;
 mod themes;
 
 use config::{Config, CHART_KINDS};
