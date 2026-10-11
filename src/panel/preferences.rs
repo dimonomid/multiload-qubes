@@ -472,10 +472,7 @@ impl Preferences {
         if let Some(id) = id.strip_prefix("saved:") {
             let theme = self.store.borrow().find(id).cloned();
             if let Some(theme) = theme {
-                *self.editor.borrow_mut() = Appearance {
-                    selection: Selection::Saved(theme.id),
-                    palettes: theme.palettes,
-                };
+                *self.editor.borrow_mut() = Appearance::saved(theme.id, theme.palettes);
             }
         } else if let Some(theme) = id
             .parse::<u32>()
@@ -549,7 +546,7 @@ impl Preferences {
         let result = self.store.borrow_mut().write(id, name, palettes);
         match result {
             Ok(id) => {
-                self.editor.borrow_mut().selection = Selection::Saved(id);
+                self.editor.borrow_mut().mark_saved(id);
                 self.rebuild_themes();
                 self.refresh();
                 true

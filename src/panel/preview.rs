@@ -190,10 +190,19 @@ fn self_test() {
     let panel = Panel::new(None, true);
     let prefs = prefs(&panel);
     assert_eq!(prefs.notebook.n_pages(), 2);
-    prefs.select("3");
+    prefs.select("4");
+    prefs.select("1000");
+    assert!(!prefs.editor.borrow().unsaved());
+    prefs.select("3"); // No discard dialog for an untouched draft.
     assert_eq!(prefs.editor.borrow().palettes[0].colors[1], 0xFDF6E3FF);
     prefs.select("4");
     assert_eq!(prefs.editor.borrow().palettes[0].colors[2], 0xFDF6E300);
+    prefs.border.set_value(2.);
+    assert!(prefs.editor.borrow().unsaved());
+    prefs.border.set_value(0.);
+    assert!(!prefs.editor.borrow().unsaved());
+    prefs.select("3"); // Undoing edits removes the warning too.
+    prefs.select("4");
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     let keep = prompts(vec![message(
@@ -212,6 +221,10 @@ fn self_test() {
         prefs.editor.borrow().selection,
         Selection::Saved(_)
     ));
+    prefs.select("1000");
+    assert!(!prefs.editor.borrow().unsaved());
+    assert!(!prefs.save_changes.is_sensitive());
+    prefs.select(&format!("saved:{id}"));
     prefs.border.set_value(3.);
     assert_eq!(
         prefs.store.borrow().find(&id).unwrap().palettes[0].border,
@@ -280,14 +293,9 @@ fn self_test() {
     );
     assert_eq!(prefs.store.borrow().themes.len(), 2);
     click(&prefs.delete, vec![message("Delete theme ‘Second’?", true)]);
-    assert!(prefs.editor.borrow().unsaved());
+    assert!(!prefs.editor.borrow().unsaved());
     assert_eq!(prefs.editor.borrow().palettes[0].border, 5);
-    let discard = prompts(vec![message(
-        "Your changes aren't saved. Discard them?",
-        true,
-    )]);
     prefs.theme.set_active_id(Some(&format!("saved:{id}")));
-    assert_eq!(discard.get(), 1);
     assert_eq!(prefs.editor.borrow().palettes[0].border, 4);
     prefs.dialog.response(ResponseType::Ok);
     let path = glib::user_config_dir().join("panel-roundtrip.rc");

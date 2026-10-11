@@ -155,11 +155,16 @@ source theme intact. **Save as…** creates a named custom theme; selecting an
 existing name asks before overwriting it. **Save changes** updates the source
 custom theme, also with confirmation. Built-ins and their names are protected.
 Saved custom themes can be renamed or deleted. Switching themes or resetting
-appearance while a draft is unsaved asks whether to discard it.
+appearance while a draft is unsaved asks whether to discard it. Unsaved means
+its palette differs from the baseline: merely selecting Custom draft does not
+warn, and reverting edits to the baseline clears the warning. A successful theme
+save updates that baseline.
 
 **Apply** saves the panel appearance (including an unsaved draft and its source);
 **Cancel** restores the appearance from when Properties opened. Applying a draft
-does not save a named theme. Explicit theme saves, renames and deletes take
+does not save a named theme. Draft baselines persist with panel settings, so
+reopening Preferences preserves whether edits are unsaved. Explicit theme saves,
+renames and deletes take
 effect immediately and are independent of Apply/Cancel. Deleting a theme keeps
 its current colors as a draft. Reset restores the original appearance settings.
 

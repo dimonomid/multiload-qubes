@@ -54,6 +54,7 @@ impl Selection {
 pub struct Appearance {
     pub selection: Selection,
     pub palettes: Palettes,
+    baseline: Palettes,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -62,10 +63,23 @@ impl Default for Appearance {
 }
 impl Appearance {
     pub fn builtin(theme: BuiltinTheme) -> Self {
+        let palettes = std::array::from_fn(|k| Palette::preset(theme, k));
         Self {
             selection: Selection::Builtin(theme),
-            palettes: std::array::from_fn(|k| Palette::preset(theme, k)),
+            palettes,
+            baseline: palettes,
         }
+    }
+    pub fn saved(id: String, palettes: Palettes) -> Self {
+        Self {
+            selection: Selection::Saved(id),
+            palettes,
+            baseline: palettes,
+        }
+    }
+    pub fn mark_saved(&mut self, id: String) {
+        self.selection = Selection::Saved(id);
+        self.baseline = self.palettes;
     }
     pub fn edit(&mut self) {
         self.selection = Selection::Draft {
@@ -80,7 +94,7 @@ impl Appearance {
         }
     }
     pub fn unsaved(&self) -> bool {
-        matches!(self.selection, Selection::Draft { .. })
+        matches!(self.selection, Selection::Draft { .. }) && self.palettes != self.baseline
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,19 +154,13 @@ impl Config {
                 BuiltinTheme::from_id(id as u32).unwrap_or(BuiltinTheme::Original),
             ),
         };
-        for (k, palette) in config.appearance.palettes.iter_mut().enumerate() {
-            let group = format!("Appearance-{k}");
-            for (f, key) in COLOR_KEYS.iter().enumerate() {
-                if let Ok(value) = file.uint64(&group, key) {
-                    if let Ok(value) = u32::try_from(value) {
-                        palette.colors[f] = value;
-                    }
-                }
-            }
-            if let Ok(width) = file.uint64(&group, "border_width") {
-                palette.border = width.min(16) as u32;
-            }
-        }
+        config.appearance.palettes = read_palettes(file, "Appearance", config.appearance.palettes);
+        config.appearance.baseline =
+            if matches!(config.appearance.selection, Selection::Draft { .. }) {
+                read_palettes(file, "DraftBaseline", config.appearance.palettes)
+            } else {
+                config.appearance.palettes
+            };
         config.normalize();
         config
     }
@@ -172,17 +180,40 @@ impl Config {
         if let Some(source) = self.appearance.selection.source() {
             file.set_string("Appearance", "custom_theme_id", source);
         }
-        for (k, palette) in self.appearance.palettes.iter().enumerate() {
-            let group = format!("Appearance-{k}");
-            for (key, color) in COLOR_KEYS.iter().zip(palette.colors) {
-                file.set_uint64(&group, key, color as u64);
-            }
-            file.set_uint64(&group, "border_width", palette.border as u64);
+        write_palettes(&file, "Appearance", &self.appearance.palettes);
+        if matches!(self.appearance.selection, Selection::Draft { .. }) {
+            write_palettes(&file, "DraftBaseline", &self.appearance.baseline);
         }
         file
     }
     pub fn save(&self, path: &Path) -> Result<(), glib::Error> {
         self.encode().save_to_file(path)
+    }
+}
+
+fn read_palettes(file: &KeyFile, prefix: &str, mut palettes: Palettes) -> Palettes {
+    for (k, palette) in palettes.iter_mut().enumerate() {
+        let group = format!("{prefix}-{k}");
+        for (f, key) in COLOR_KEYS.iter().enumerate() {
+            if let Ok(value) = file.uint64(&group, key) {
+                if let Ok(value) = u32::try_from(value) {
+                    palette.colors[f] = value;
+                }
+            }
+        }
+        if let Ok(width) = file.uint64(&group, "border_width") {
+            palette.border = width.min(16) as u32;
+        }
+    }
+    palettes
+}
+fn write_palettes(file: &KeyFile, prefix: &str, palettes: &Palettes) {
+    for (k, palette) in palettes.iter().enumerate() {
+        let group = format!("{prefix}-{k}");
+        for (key, color) in COLOR_KEYS.iter().zip(palette.colors) {
+            file.set_uint64(&group, key, color as u64);
+        }
+        file.set_uint64(&group, "border_width", palette.border as u64);
     }
 }
 
@@ -197,12 +228,47 @@ mod tests {
         assert_eq!(config.width, 4);
         assert!(!config.enabled[0]);
         assert!(config.enabled[1]);
-        assert!(config.appearance.unsaved());
+        assert!(!config.appearance.unsaved());
         assert_eq!(config.appearance.palettes[0].colors[2], 0xFDF6E300);
         assert_eq!(Config::decode(&config.encode()), config);
         let mut saved = config;
-        saved.appearance.selection =
-            Selection::Saved(saved.appearance.selection.source().unwrap().into());
+        saved
+            .appearance
+            .mark_saved(saved.appearance.selection.source().unwrap().into());
         assert_eq!(Config::decode(&saved.encode()), saved);
+    }
+    #[test]
+    fn draft_is_dirty_only_while_palette_differs_from_its_baseline() {
+        let mut appearance = Appearance::builtin(BuiltinTheme::SolarizedLightGradient);
+        appearance.edit();
+        assert!(!appearance.unsaved());
+        appearance.palettes[5].colors[3] ^= 255; // Opacity counts as an edit.
+        assert!(appearance.unsaved());
+        appearance.palettes[5].colors[3] ^= 255;
+        assert!(!appearance.unsaved());
+        appearance.palettes[0].border = 3;
+        assert!(appearance.unsaved());
+        appearance.mark_saved("063e30ca-bfce-4149-98f2-b0f07f7fdaf2".into());
+        appearance.edit();
+        assert!(!appearance.unsaved());
+        appearance.palettes[0].border = 0;
+        assert!(appearance.unsaved());
+        appearance.palettes[0].border = 3;
+        assert!(!appearance.unsaved());
+    }
+    #[test]
+    fn applying_and_reloading_a_draft_preserves_its_baseline() {
+        let mut config = Config {
+            appearance: Appearance::builtin(BuiltinTheme::SolarizedLight),
+            ..Config::default()
+        };
+        config.appearance.edit();
+        assert!(!Config::decode(&config.encode()).appearance.unsaved());
+        config.appearance.palettes[6].border = 2;
+        let mut loaded = Config::decode(&config.encode());
+        assert_eq!(loaded, config);
+        assert!(loaded.appearance.unsaved());
+        loaded.appearance.palettes[6].border = 0;
+        assert!(!loaded.appearance.unsaved());
     }
 }
