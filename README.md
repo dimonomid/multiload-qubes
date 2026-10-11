@@ -87,7 +87,10 @@ XFCE adapter. The UI modules live in `src/panel/`: preferences, config,
 theme files, runtime and preview/integration checks. Graph history, Rust-string
 tooltips and typed Cairo drawing live in `src/graphs/`. The panel calls that Rust
 API directly; there is no separate graph C API or raw Cairo-pointer interface.
-Only `native/plugin.c` uses the XFCE C API.
+Only `native/plugin.c` uses the XFCE C API. Its Rust boundary is isolated in
+`src/panel/ffi.rs`: callback declarations, raw handle ownership and a safe Host
+wrapper. The panel runtime uses typed methods, and shutdown disconnects the host
+so retained modal callbacks cannot access a destroyed native plugin.
 
 Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
 Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.

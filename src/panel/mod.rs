@@ -1,35 +1,18 @@
 //! GTK3 panel runtime. Only XFCE-specific calls cross the small native adapter.
 mod config;
+mod ffi;
 mod preferences;
 pub(crate) mod preview;
 mod themes;
 
 use config::{Config, CHART_KINDS};
-use glib::translate::{from_glib_full, ToGlibPtr};
+use ffi::Host;
 use gtk::prelude::*;
 use std::{
     cell::{Cell, RefCell},
-    ffi::{c_char, c_void},
-    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
-
-/// Non-owning XFCE calls supplied by the native adapter. This avoids linking
-/// XFCE into the Rust library, its unit tests, or the collector.
-#[repr(C)]
-pub struct HostApi {
-    size: unsafe extern "C" fn(*mut c_void) -> i32,
-    vertical: unsafe extern "C" fn(*mut c_void) -> i32,
-    attach: unsafe extern "C" fn(*mut c_void, *mut gtk::ffi::GtkWidget),
-    path: unsafe extern "C" fn(*mut c_void, i32) -> *mut c_char,
-    block: unsafe extern "C" fn(*mut c_void, i32),
-}
-#[derive(Clone, Copy)]
-struct Host {
-    pointer: *mut c_void,
-    api: &'static HostApi,
-}
 
 pub(super) struct Panel {
     host: Option<Host>,
@@ -57,11 +40,9 @@ impl Panel {
             menu_blocked: Cell::new(false),
             demo,
         });
-        if let Some(host) = host {
-            panel
-                .vertical
-                .set(unsafe { (host.api.vertical)(host.pointer) != 0 });
-            if let Some(path) = panel.path(false) {
+        if let Some(host) = &panel.host {
+            panel.vertical.set(host.is_vertical());
+            if let Some(path) = host.load_path() {
                 match Config::load(&path) {
                     Ok(config) => *panel.config.borrow_mut() = config,
                     Err(e) => eprintln!("Cannot load Multiload settings: {e}"),
@@ -115,13 +96,8 @@ impl Panel {
                 tooltip.set_tip_area(&rect);
                 true
             });
-        if let Some(host) = host {
-            unsafe {
-                (host.api.attach)(
-                    host.pointer,
-                    panel.area.upcast_ref::<gtk::Widget>().to_glib_none().0,
-                );
-            }
+        if let Some(host) = &panel.host {
+            host.attach(&panel.area);
         }
         panel.resize();
         panel.tick();
@@ -129,27 +105,16 @@ impl Panel {
         panel.area.show();
         panel
     }
-    fn path(&self, save: bool) -> Option<PathBuf> {
-        let host = self.host?;
-        let path = unsafe { (host.api.path)(host.pointer, i32::from(save)) };
-        if path.is_null() {
-            None
-        } else {
-            Some(unsafe { from_glib_full(path) })
-        }
-    }
     fn block_menu(&self, block: bool) {
         if self.closed.get() || self.menu_blocked.replace(block) == block {
             return;
         }
-        if let Some(host) = self.host {
-            unsafe {
-                (host.api.block)(host.pointer, i32::from(block));
-            }
+        if let Some(host) = &self.host {
+            host.set_menu_blocked(block);
         }
     }
     fn save(&self) {
-        if let Some(path) = self.path(true) {
+        if let Some(path) = self.host.as_ref().and_then(Host::save_path) {
             if let Err(e) = self.config.borrow().save(&path) {
                 eprintln!("Cannot save Multiload settings: {e}");
             }
@@ -161,9 +126,7 @@ impl Panel {
         self.area.queue_draw();
     }
     fn resize(&self) {
-        let size = self
-            .host
-            .map_or(48, |host| unsafe { (host.api.size)(host.pointer) });
+        let size = self.host.as_ref().map_or(48, Host::size);
         let config = self.config.borrow();
         let width = if config.width == 0 {
             size
@@ -177,6 +140,12 @@ impl Panel {
             (width * count, size)
         };
         self.area.set_size_request(w, h);
+    }
+    fn size_changed(&self, vertical: Option<bool>) {
+        if let Some(vertical) = vertical {
+            self.vertical.set(vertical);
+        }
+        self.resize();
     }
     fn restart_timer(self: &Rc<Self>) {
         if let Some(timer) = self.timer.borrow_mut().take() {
@@ -216,6 +185,9 @@ impl Panel {
         let prefs = self.preferences.borrow_mut().take();
         if let Some(prefs) = prefs {
             prefs.close();
+        }
+        if let Some(host) = &self.host {
+            host.detach();
         }
     }
 }
@@ -275,66 +247,7 @@ fn chart_at(
     ))
 }
 
-// C owns one Rc reference until free-data. Each callback borrows a fresh Rc so
-// removal during a nested GTK dialog cannot invalidate the Rust callback stack.
-unsafe fn panel_handle(handle: *const Panel) -> Rc<Panel> {
-    Rc::increment_strong_count(handle);
-    Rc::from_raw(handle)
-}
-/// # Safety
-/// `host` is a live XFCE plugin on the GTK thread, retained until mq_panel_free.
-/// `api` points to the adapter’s static callback table for the panel lifetime.
-#[no_mangle]
-pub unsafe extern "C" fn mq_panel_new(host: *mut c_void, api: *const HostApi) -> *const c_void {
-    if let Err(e) = gtk::init() {
-        eprintln!("Cannot initialize GTK: {e}");
-        return std::ptr::null();
-    }
-    if host.is_null() || api.is_null() {
-        return std::ptr::null();
-    }
-    Rc::into_raw(Panel::new(
-        Some(Host {
-            pointer: host,
-            api: &*api,
-        }),
-        false,
-    ))
-    .cast()
-}
-/// # Safety
-/// `handle` is the live GTK-thread handle returned by mq_panel_new, freed once.
-#[no_mangle]
-pub unsafe extern "C" fn mq_panel_free(handle: *const c_void) {
-    if !handle.is_null() {
-        let panel = Rc::from_raw(handle.cast::<Panel>());
-        panel.shutdown();
-    }
-}
-/// # Safety
-/// `handle` is a live panel handle on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_panel_save(handle: *const c_void) {
-    panel_handle(handle.cast()).save();
-}
-/// # Safety
-/// `handle` is a live panel handle on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_panel_configure(handle: *const c_void) {
-    panel_handle(handle.cast()).configure();
-}
-/// # Safety
-/// `handle` is a live panel handle on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_panel_resize(handle: *const c_void, vertical: i32) {
-    let panel = panel_handle(handle.cast());
-    if vertical >= 0 {
-        panel.vertical.set(vertical != 0);
-    }
-    panel.resize();
-}
-#[no_mangle]
-pub extern "C" fn mq_panel_about() {
+fn about() {
     gtk::AboutDialog::builder()
         .program_name("Multiload for Qubes")
         .version(env!("CARGO_PKG_VERSION"))
