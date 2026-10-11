@@ -259,7 +259,9 @@ fn about() {
     gtk::AboutDialog::builder()
         .program_name("Multiload for Qubes")
         .version(env!("CARGO_PKG_VERSION"))
-        .comments("CPU, RAM, network, swap and disk I/O graphs.\nPalette from multiload-ng.")
+        .comments("CPU, RAM, network, swap and disk I/O graphs.\nPalette from multiload-ng.\n\nWritten by Dmitry Frank")
+        .website("https://dmitryfrank.com")
+        .website_label("https://dmitryfrank.com")
         .license_type(gtk::License::Gpl20)
         .build()
         .show();
