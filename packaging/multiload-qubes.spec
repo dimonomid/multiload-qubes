@@ -1,18 +1,12 @@
+# Binaries are built in the checkout, not in RPM's source directory.
+%undefine _debugsource_packages
+
 Name:           multiload-qubes
 Version:        0.12.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
-Source0:        %{name}-%{version}.tar.gz
-Source1:        %{name}-%{version}-vendor.tar.gz
-BuildRequires:  gcc
-BuildRequires:  cargo
-BuildRequires:  rust
-BuildRequires:  make
-BuildRequires:  pkgconfig(gtk+-3.0)
-BuildRequires:  pkgconfig(libxfce4panel-2.0)
-BuildRequires:  xen-devel
-BuildRequires:  python3
+Source0:        %{name}-payload.tar.gz
 BuildRequires:  systemd-rpm-macros
 Requires:       xfce4-panel
 Requires:       xen-libs
@@ -24,19 +18,12 @@ Native XFCE panel plugin displaying scrolling CPU, memory, network, swap and dis
 A read-only dom0 collector publishes Xen allocation and guest-reported usage.
 
 %prep
-%autosetup
-tar -xzf %{SOURCE1}
-mkdir -p .cargo
-cp packaging/cargo-vendor.toml .cargo/config.toml
-
-%build
-%make_build CFLAGS='%{optflags}'
-
-%check
-make test
+%setup -q -c -T -n %{name}-payload
+tar -xzf %{SOURCE0}
 
 %install
-%make_install LIBDIR=%{_libdir} UNITDIR=%{_unitdir}
+mkdir -p %{buildroot}
+cp -a usr %{buildroot}/
 
 %post
 %systemd_post multiload-qubes-collector.service

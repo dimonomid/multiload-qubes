@@ -97,7 +97,7 @@ The `panel` build uses cbindgen (a pinned Cargo build dependency) to generate
 header instead of maintaining its own callback table and Rust function
 prototypes. The generated file is ignored by Git, regenerated when the Rust API
 or `cbindgen.toml` changes, and recreated if deleted. No separately installed
-cbindgen tool is required; `cargo fetch --locked`/vendoring includes it for
+cbindgen tool is required; `cargo fetch --locked` includes it for
 offline builds. Standalone collector builds do not enable this build dependency.
 
 Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
@@ -122,19 +122,18 @@ sudo dnf install rpm-build systemd-rpm-macros
 make rpm
 ```
 
-To put temporary RPM build files on a separate filesystem:
+`make rpm` runs the regular incremental build and tests in this checkout, then
+packages the resulting binaries. It reuses Cargo's normal `target/` directory;
+RPM packaging does not compile the project again or vendor dependencies.
+Binary RPMs are written under `build/rpm/RPMS/`. The initial checkout needs
+`cargo fetch --locked` once before the offline Make targets. The same command
+works in CI from a fresh checkout after fetching dependencies.
 
-```bash
-make rpm
-```
-
-RPMs and a source RPM are written under `build/rpm/`. The source RPM bundles
-Cargo dependencies and builds offline; the initial development checkout needs
-`cargo fetch --locked` once before the offline Make targets. **Build against your dom0
+**Build against your dom0
 distribution**, typically in a matching disposable build VM. An RPM compiled on
 this Fedora 43 development machine is not guaranteed to run on an older dom0:
-Rust, GLib, GTK and glibc minimum versions can differ. Use the source RPM or source
-tree in the matching build environment. No Rust compiler is needed at runtime.
+Rust, GLib, GTK and glibc minimum versions can differ. Build the source tree in
+the matching environment. No Rust compiler is needed at runtime.
 
 Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:

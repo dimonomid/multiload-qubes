@@ -2,7 +2,6 @@ PREFIX ?= /usr
 LIBDIR ?= $(PREFIX)/lib64
 LIBEXECDIR ?= $(PREFIX)/libexec
 UNITDIR ?= $(PREFIX)/lib/systemd/system
-RPM_BUILD_DIR ?= $(CURDIR)/build/rpm/BUILD
 CC ?= cc
 CARGO ?= cargo
 PKGS = gtk+-3.0 libxfce4panel-2.0
@@ -51,12 +50,13 @@ install: all
 	install -Dm755 $(COLLECTOR) $(DESTDIR)$(LIBEXECDIR)/multiload-qubes-collector
 	install -Dm644 data/multiload-qubes-collector.service $(DESTDIR)$(UNITDIR)/multiload-qubes-collector.service
 
-rpm:
+rpm: all test
 	mkdir -p build/rpm/SOURCES
-	$(CARGO) vendor --offline --locked build/vendor > /dev/null
-	tar -czf build/rpm/SOURCES/multiload-qubes-0.12.0-vendor.tar.gz -C build vendor
-	tar --exclude=./build --exclude=./target --exclude=./.git --exclude=./.agents --exclude=./.aws --exclude=./.codex --exclude='__pycache__' --transform='s,^\.,multiload-qubes-0.12.0,' -czf build/rpm/SOURCES/multiload-qubes-0.12.0.tar.gz .
-	rpmbuild -ba --define '_topdir $(CURDIR)/build/rpm' --define '_builddir $(RPM_BUILD_DIR)' packaging/multiload-qubes.spec
+	rm -rf build/rpm/stage
+	$(MAKE) install DESTDIR="$(CURDIR)/build/rpm/stage" PREFIX=/usr LIBDIR="$(shell rpm --eval '%{_libdir}')" UNITDIR="$(shell rpm --eval '%{_unitdir}')"
+	cp LICENSE README.md build/rpm/stage/
+	tar -czf build/rpm/SOURCES/multiload-qubes-payload.tar.gz -C build/rpm/stage .
+	rpmbuild -bb --define '_topdir $(CURDIR)/build/rpm' packaging/multiload-qubes.spec
 
 clean:
 	$(CARGO) clean
