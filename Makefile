@@ -7,16 +7,17 @@ CC ?= cc
 CARGO ?= cargo
 PKGS = gtk+-3.0 libxfce4panel-2.0
 CFLAGS ?= -O2 -g
-CPPFLAGS += $(shell pkg-config --cflags $(PKGS))
+CPPFLAGS += -Ibuild $(shell pkg-config --cflags $(PKGS))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) -ldl -lpthread -lm
 RUSTLIB = build/libmultiload_qubes.a
 COLLECTOR = target/release/multiload-qubes-collector
 PREVIEW = target/release/multiload-qubes-preview
+PANEL_HEADER = build/panel-api.h
 
 .PHONY: all test check gui-test install rpm clean
 all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR)
 
-$(RUSTLIB) $(COLLECTOR) $(PREVIEW) &: Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
+$(RUSTLIB) $(COLLECTOR) $(PREVIEW) $(PANEL_HEADER) &: build.rs cbindgen.toml Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
 	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector
 	$(CARGO) build --release --offline --features panel --lib --bin multiload-qubes-preview
 	cp target/release/libmultiload_qubes.a $(RUSTLIB)
@@ -24,7 +25,7 @@ $(RUSTLIB) $(COLLECTOR) $(PREVIEW) &: Cargo.toml Cargo.lock snapshot/Cargo.toml 
 build:
 	mkdir -p build
 
-build/libmultiload-qubes.so: native/plugin.c $(RUSTLIB) | build
+build/libmultiload-qubes.so: native/plugin.c $(RUSTLIB) $(PANEL_HEADER) | build
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Wall -Wextra -Werror -fPIC -shared $(LDFLAGS) -o $@ $< $(RUSTLIB) $(LDLIBS) -Wl,-z,defs
 
 build/multiload-qubes-preview: $(PREVIEW) | build

@@ -92,6 +92,14 @@ Only `native/plugin.c` uses the XFCE C API. Its Rust boundary is isolated in
 wrapper. The panel runtime uses typed methods, and shutdown disconnects the host
 so retained modal callbacks cannot access a destroyed native plugin.
 
+The `panel` build uses cbindgen (a pinned Cargo build dependency) to generate
+`build/panel-api.h` directly from `src/panel/ffi.rs`. The C adapter includes this
+header instead of maintaining its own callback table and Rust function
+prototypes. The generated file is ignored by Git, regenerated when the Rust API
+or `cbindgen.toml` changes, and recreated if deleted. No separately installed
+cbindgen tool is required; `cargo fetch --locked`/vendoring includes it for
+offline builds. Standalone collector builds do not enable this build dependency.
+
 Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
 Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.
 These test the shared plugin entry point and widget lifecycle, as well as settings

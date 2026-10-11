@@ -40,4 +40,7 @@ members = ["snapshot"]
 resolver = "2"
 
 [features]
-panel = ["dep:gtk", "dep:glib", "dep:gio", "dep:cairo-rs"]
+panel = ["dep:gtk", "dep:glib", "dep:gio", "dep:cairo-rs", "dep:cbindgen"]
+
+[build-dependencies]
+cbindgen = { version = "0.29.4", default-features = false, optional = true }

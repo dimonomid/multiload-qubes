@@ -3,31 +3,22 @@
  */
 #include <libxfce4panel/libxfce4panel.h>
 
-typedef struct {
-    int (*size)(XfcePanelPlugin *);
-    int (*vertical)(XfcePanelPlugin *);
-    void (*attach)(XfcePanelPlugin *, GtkWidget *);
-    char *(*path)(XfcePanelPlugin *, int);
-    void (*block)(XfcePanelPlugin *, int);
-} PanelApi;
-extern const void *mq_panel_new(void *, const PanelApi *);
-extern void mq_panel_free(const void *);
-extern void mq_panel_save(const void *);
-extern void mq_panel_configure(const void *);
-extern void mq_panel_resize(const void *, int);
-extern void mq_panel_about(void);
+#include "panel-api.h"
 
-static int mq_xfce_size(XfcePanelPlugin *plugin) { return xfce_panel_plugin_get_size(plugin); }
-static int mq_xfce_vertical(XfcePanelPlugin *plugin) {
-    return xfce_panel_plugin_get_orientation(plugin) == GTK_ORIENTATION_VERTICAL;
+static int mq_xfce_size(void *host) { return xfce_panel_plugin_get_size(XFCE_PANEL_PLUGIN(host)); }
+static int mq_xfce_vertical(void *host) {
+    return xfce_panel_plugin_get_orientation(XFCE_PANEL_PLUGIN(host)) == GTK_ORIENTATION_VERTICAL;
 }
-static char *mq_xfce_path(XfcePanelPlugin *plugin, int save) {
+static char *mq_xfce_path(void *host, int save) {
+    XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     return save ? xfce_panel_plugin_save_location(plugin, TRUE) : xfce_panel_plugin_lookup_rc_file(plugin);
 }
-static void mq_xfce_block(XfcePanelPlugin *plugin, int block) {
+static void mq_xfce_block(void *host, int block) {
+    XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     if (block) xfce_panel_plugin_block_menu(plugin); else xfce_panel_plugin_unblock_menu(plugin);
 }
-static void mq_xfce_attach(XfcePanelPlugin *plugin, GtkWidget *widget) {
+static void mq_xfce_attach(void *host, GtkWidget *widget) {
+    XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     gtk_container_add(GTK_CONTAINER(plugin), widget);
     xfce_panel_plugin_set_small(plugin, FALSE);
     xfce_panel_plugin_add_action_widget(plugin, widget);
@@ -45,7 +36,10 @@ static void orientation_changed(XfcePanelPlugin *plugin, GtkOrientation orientat
     (void)plugin; mq_panel_resize(state, orientation == GTK_ORIENTATION_VERTICAL);
 }
 static void construct(XfcePanelPlugin *plugin) {
-    static const PanelApi api = {mq_xfce_size, mq_xfce_vertical, mq_xfce_attach, mq_xfce_path, mq_xfce_block};
+    static const HostApi api = {
+        .size = mq_xfce_size, .vertical = mq_xfce_vertical,
+        .attach = mq_xfce_attach, .path = mq_xfce_path, .block = mq_xfce_block
+    };
     const void *state = mq_panel_new(plugin, &api);
     if (!state) return;
     g_signal_connect(plugin, "free-data", G_CALLBACK(released), (void *)state);

@@ -15,7 +15,7 @@ use std::{
     rc::Rc,
 };
 
-/// Matches PanelApi in native/plugin.c. All callbacks run on the GTK thread.
+/// Native callback table, exported to panel-api.h. All callbacks run on the GTK thread.
 #[repr(C)]
 pub struct HostApi {
     size: unsafe extern "C" fn(*mut c_void) -> i32,
