@@ -195,30 +195,34 @@ fn screenshot(prefs: &Preferences) {
 }
 fn self_test() {
     use gtk::ResponseType;
+    let gradient = Selection::Builtin(BuiltinTheme::LightGradient).id();
+    let light = Selection::Builtin(BuiltinTheme::SolarizedLight).id();
+    let tango = Selection::Builtin(BuiltinTheme::Tango).id();
+    let draft = Selection::Draft { source: None }.id();
     renderer_test();
     let panel = Panel::new(None, true);
     let prefs = prefs(&panel);
     assert_eq!(prefs.notebook.n_pages(), 2);
-    prefs.select("1");
-    prefs.select("1000");
+    prefs.select(&gradient);
+    prefs.select(&draft);
     assert!(!prefs.editor.borrow().unsaved());
-    prefs.select("4"); // No discard dialog for an untouched draft.
+    prefs.select(&light); // No discard dialog for an untouched draft.
     assert_eq!(prefs.editor.borrow().palettes[0].colors[1], 0xFDF6E3FF);
-    prefs.select("1");
+    prefs.select(&gradient);
     assert_eq!(prefs.editor.borrow().palettes[0].colors[2], 0xFDF6E300);
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     prefs.border.set_value(0.);
     assert!(!prefs.editor.borrow().unsaved());
-    prefs.select("4"); // Undoing edits removes the warning too.
-    prefs.select("1");
+    prefs.select(&light); // Undoing edits removes the warning too.
+    prefs.select(&gradient);
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     let keep = prompts(vec![message(
         "Your changes aren't saved. Discard them?",
         false,
     )]);
-    prefs.theme.set_active_id(Some("2"));
+    prefs.theme.set_active_id(Some(&tango));
     assert_eq!(keep.get(), 1);
     assert!(prefs.editor.borrow().unsaved());
     assert_eq!(prefs.editor.borrow().palettes[0].border, 2);
@@ -230,7 +234,7 @@ fn self_test() {
         prefs.editor.borrow().selection,
         Selection::Saved(_)
     ));
-    prefs.select("1000");
+    prefs.select(&draft);
     assert!(!prefs.editor.borrow().unsaved());
     assert!(!prefs.save_changes.is_sensitive());
     prefs.select(&format!("saved:{id}"));
@@ -342,7 +346,7 @@ fn self_test() {
         "Your changes aren't saved. Discard them?",
         true,
     )]);
-    prefs.theme.set_active_id(Some("2"));
+    prefs.theme.set_active_id(Some(&tango));
     assert_eq!(discard.get(), 1);
     prefs.dialog.response(ResponseType::Cancel);
     assert_eq!(*panel.config.borrow(), committed);
@@ -363,7 +367,7 @@ fn self_test() {
         let owner = panel.clone();
         glib::idle_add_local_once(move || owner.shutdown());
         if action == 0 {
-            prefs.theme.set_active_id(Some("2"));
+            prefs.theme.set_active_id(Some(&tango));
         } else {
             prefs.save_as.emit_clicked();
         }

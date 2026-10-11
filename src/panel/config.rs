@@ -28,6 +28,9 @@ const COLOR_KEYS: [&str; 7] = [
 ];
 pub type Palettes = [Palette; 7];
 
+const SAVED_THEME_ID: i32 = 999;
+const DRAFT_THEME_ID: i32 = 1000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     Builtin(BuiltinTheme),
@@ -37,9 +40,15 @@ pub enum Selection {
 impl Selection {
     pub fn id(&self) -> String {
         match self {
-            Self::Builtin(theme) => (*theme as u32).to_string(),
             Self::Saved(id) => format!("saved:{id}"),
-            Self::Draft { .. } => "1000".into(),
+            _ => self.persisted_id().to_string(),
+        }
+    }
+    fn persisted_id(&self) -> i32 {
+        match self {
+            Self::Builtin(theme) => *theme as i32,
+            Self::Saved(_) => SAVED_THEME_ID,
+            Self::Draft { .. } => DRAFT_THEME_ID,
         }
     }
     pub fn source(&self) -> Option<&str> {
@@ -147,9 +156,12 @@ impl Config {
             .ok()
             .map(|s| s.to_string())
             .filter(|id| glib::uuid_string_is_valid(id));
-        config.appearance.selection = match file.integer("Appearance", "theme").unwrap_or(0) {
-            999 if source.is_some() => Selection::Saved(source.unwrap()),
-            999 | 1000 => Selection::Draft { source },
+        config.appearance.selection = match file
+            .integer("Appearance", "theme")
+            .unwrap_or(BuiltinTheme::Original as i32)
+        {
+            SAVED_THEME_ID if source.is_some() => Selection::Saved(source.unwrap()),
+            SAVED_THEME_ID | DRAFT_THEME_ID => Selection::Draft { source },
             id => Selection::Builtin(
                 BuiltinTheme::from_id(id as u32).unwrap_or(BuiltinTheme::Original),
             ),
@@ -171,12 +183,11 @@ impl Config {
         for (key, value) in CHART_KEYS.iter().zip(self.enabled) {
             file.set_boolean("Graphs", key, value);
         }
-        let id = match self.appearance.selection {
-            Selection::Builtin(t) => t as i32,
-            Selection::Saved(_) => 999,
-            Selection::Draft { .. } => 1000,
-        };
-        file.set_integer("Appearance", "theme", id);
+        file.set_integer(
+            "Appearance",
+            "theme",
+            self.appearance.selection.persisted_id(),
+        );
         if let Some(source) = self.appearance.selection.source() {
             file.set_string("Appearance", "custom_theme_id", source);
         }

@@ -14,11 +14,11 @@ pub(super) enum BuiltinTheme {
 impl BuiltinTheme {
     pub(super) fn from_id(id: u32) -> Option<Self> {
         match id {
-            0 => Some(Self::Original),
-            1 => Some(Self::LightGradient),
-            2 => Some(Self::Tango),
-            3 => Some(Self::SolarizedDark),
-            4 => Some(Self::SolarizedLight),
+            id if id == Self::Original as u32 => Some(Self::Original),
+            id if id == Self::LightGradient as u32 => Some(Self::LightGradient),
+            id if id == Self::Tango as u32 => Some(Self::Tango),
+            id if id == Self::SolarizedDark as u32 => Some(Self::SolarizedDark),
+            id if id == Self::SolarizedLight as u32 => Some(Self::SolarizedLight),
             _ => None,
         }
     }

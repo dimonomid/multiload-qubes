@@ -4,6 +4,7 @@ use super::{
     themes::{reserved_name, valid_name, ThemeStore, BUILTINS},
     Panel,
 };
+use crate::palette::BuiltinTheme;
 use gtk::{prelude::*, ResponseType};
 use std::{
     cell::{Cell, RefCell},
@@ -308,7 +309,7 @@ impl Preferences {
             let weak = Rc::downgrade(self);
             reset.connect_clicked(move |_| {
                 if let Some(p) = weak.upgrade() {
-                    p.select("0");
+                    p.select(&Selection::Builtin(BuiltinTheme::Original).id());
                 }
             });
         }
@@ -395,13 +396,17 @@ impl Preferences {
         self.updating.set(true);
         self.theme.remove_all();
         for (builtin, name) in BUILTINS {
-            self.theme.append(Some(&(builtin as u32).to_string()), name);
+            self.theme
+                .append(Some(&Selection::Builtin(builtin).id()), name);
         }
         for theme in &self.store.borrow().themes {
             self.theme
                 .append(Some(&format!("saved:{}", theme.id)), &theme.name);
         }
-        self.theme.append(Some("1000"), "Custom draft");
+        self.theme.append(
+            Some(&(Selection::Draft { source: None }).id()),
+            "Custom draft",
+        );
         self.updating.set(false);
     }
     fn apply(&self) -> Result<(), String> {
@@ -461,7 +466,7 @@ impl Preferences {
         }
     }
     pub(super) fn select(&self, id: &str) {
-        if id == "1000" {
+        if id == (Selection::Draft { source: None }).id() {
             self.editor.borrow_mut().edit();
             self.refresh();
             return;
@@ -482,11 +487,7 @@ impl Preferences {
             if let Some(theme) = theme {
                 *self.editor.borrow_mut() = Appearance::saved(theme.id, theme.palettes);
             }
-        } else if let Some(theme) = id
-            .parse::<u32>()
-            .ok()
-            .and_then(crate::palette::BuiltinTheme::from_id)
-        {
+        } else if let Some(theme) = id.parse::<u32>().ok().and_then(BuiltinTheme::from_id) {
             *self.editor.borrow_mut() = Appearance::builtin(theme);
         }
         self.refresh();
