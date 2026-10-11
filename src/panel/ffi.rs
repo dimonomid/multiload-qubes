@@ -141,7 +141,9 @@ pub unsafe extern "C" fn mq_panel_free(handle: *const c_void) {
 #[no_mangle]
 pub unsafe extern "C" fn mq_panel_save(handle: *const c_void) {
     // SAFETY: the callback borrows the live handle for this operation.
-    unsafe { panel_handle(handle) }.save();
+    if let Err(error) = unsafe { panel_handle(handle) }.save() {
+        eprintln!("Cannot save Multiload settings: {error}");
+    }
 }
 /// # Safety
 /// `handle` is a live panel handle on the GTK thread, still owned by C.

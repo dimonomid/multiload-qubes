@@ -175,6 +175,8 @@ warn, and reverting edits to the baseline clears the warning. A successful theme
 save updates that baseline.
 
 **Apply** saves the panel appearance (including an unsaved draft and its source);
+If saving fails, Preferences shows the error and keeps all edits open for retry
+or Cancel; the committed panel settings are unchanged.
 **Cancel** restores the appearance from when Properties opened. Applying a draft
 does not save a named theme. Draft baselines persist with panel settings, so
 reopening Preferences preserves whether edits are unsaved. Explicit theme saves,

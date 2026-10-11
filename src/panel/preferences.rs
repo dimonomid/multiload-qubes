@@ -206,7 +206,10 @@ impl Preferences {
         self.dialog.connect_response(move |_, response| {
             if let Some(p) = weak.upgrade() {
                 if response == ResponseType::Ok {
-                    p.apply();
+                    if let Err(error) = p.apply() {
+                        p.error(&format!("Could not save panel settings.\n{error}"));
+                        return;
+                    }
                 }
                 p.close();
             }
@@ -401,21 +404,26 @@ impl Preferences {
         self.theme.append(Some("1000"), "Custom draft");
         self.updating.set(false);
     }
-    fn apply(&self) {
-        let Some(owner) = self.owner.upgrade().filter(|p| !p.closed.get()) else {
-            return;
-        };
+    fn apply(&self) -> Result<(), String> {
+        let owner = self
+            .owner
+            .upgrade()
+            .filter(|p| !p.closed.get())
+            .ok_or("The panel item has been removed.")?;
         let mut config = owner.config.borrow().clone();
         config.width = self.width.value_as_int();
         config.interval = self.interval.value_as_int() as u32;
         config.enabled = std::array::from_fn(|i| self.enabled[i].is_active());
         config.appearance = self.editor.borrow().clone();
         config.normalize();
+        // Commit only after persistence succeeds: failures leave the current
+        // panel settings and the editable dialog intact for retry or Cancel.
+        owner.save_config(&config)?;
         *owner.config.borrow_mut() = config;
         self.accepted.set(true);
         owner.resize();
         owner.restart_timer();
-        owner.save();
+        Ok(())
     }
     fn confirm(&self, text: &str, cancel: &str, accept: &str) -> bool {
         let dialog = gtk::MessageDialog::new(

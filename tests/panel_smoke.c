@@ -1,6 +1,7 @@
 /* Load the actual shared plugin using XFCE's module entry point. */
 #include <gtk/gtk.h>
 #include <gmodule.h>
+#include <glib/gstdio.h>
 #include <libxfce4panel/libxfce4panel.h>
 
 typedef XfcePanelPlugin *(*Construct)(const gchar *, gint, const gchar *,
@@ -42,6 +43,99 @@ static gboolean has_label(GtkWidget *widget, const char *text) {
         found = has_label(child->data, text);
     g_list_free(children);
     return found;
+}
+/* Find the real Rust dialog; no application state is mocked for these checks. */
+static GtkWidget *preferences_dialog(void) {
+    GList *windows = gtk_window_list_toplevels();
+    GtkWidget *dialog = NULL;
+    for (GList *item = windows; item; item = item->next)
+        if (GTK_IS_DIALOG(item->data) && !GTK_IS_MESSAGE_DIALOG(item->data) &&
+            gtk_widget_get_visible(item->data)) dialog = item->data;
+    g_list_free(windows);
+    return dialog;
+}
+static GtkWidget *preferences_page(GtkWidget *dialog, int page) {
+    GList *children = gtk_container_get_children(GTK_CONTAINER(gtk_dialog_get_content_area(GTK_DIALOG(dialog))));
+    GtkWidget *result = NULL;
+    for (GList *item = children; item; item = item->next)
+        if (GTK_IS_NOTEBOOK(item->data)) result = gtk_notebook_get_nth_page(GTK_NOTEBOOK(item->data), page);
+    g_list_free(children);
+    g_assert_true(GTK_IS_GRID(result));
+    return result;
+}
+static gboolean dismiss_save_error(gpointer data) {
+    gboolean *seen = data;
+    GList *windows = gtk_window_list_toplevels();
+    for (GList *item = windows; item; item = item->next) {
+        if (!GTK_IS_MESSAGE_DIALOG(item->data) || !gtk_widget_get_visible(item->data)) continue;
+        char *text = NULL;
+        g_object_get(item->data, "text", &text, NULL);
+        g_assert_nonnull(g_strrstr(text, "Could not save panel settings."));
+        g_free(text);
+        *seen = TRUE;
+        gtk_dialog_response(GTK_DIALOG(item->data), GTK_RESPONSE_CLOSE);
+        g_list_free(windows);
+        return G_SOURCE_REMOVE;
+    }
+    g_list_free(windows);
+    return G_SOURCE_CONTINUE;
+}
+static void failed_apply(GtkWidget *dialog, const char *path, const char *backup) {
+    g_assert_cmpint(g_rename(path, backup), ==, 0);
+    /* A directory at the settings filename reliably rejects atomic replacement. */
+    g_assert_cmpint(g_mkdir(path, 0700), ==, 0);
+    gboolean seen = FALSE;
+    g_idle_add(dismiss_save_error, &seen);
+    gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+    g_assert_true(seen);
+    g_assert_true(gtk_widget_get_visible(dialog));
+    g_assert_cmpint(g_rmdir(path), ==, 0);
+    g_assert_cmpint(g_rename(backup, path), ==, 0);
+}
+static void apply_save_failure_test(XfcePanelPlugin *plugin, const char *path) {
+    char *backup = g_strconcat(path, ".before-failed-save", NULL);
+    GtkWidget *dialog = preferences_dialog();
+    g_assert_nonnull(dialog);
+    g_object_ref(dialog);
+    GtkWidget *width = gtk_grid_get_child_at(GTK_GRID(preferences_page(dialog, 0)), 1, 0);
+    GtkWidget *color = gtk_grid_get_child_at(GTK_GRID(preferences_page(dialog, 1)), 1, 6);
+    g_assert_true(GTK_IS_SPIN_BUTTON(width));
+    g_assert_true(GTK_IS_COLOR_BUTTON(color));
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(width), 64);
+    GdkRGBA edited = {0.2, 0.4, 0.6, 0.5};
+    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(color), &edited);
+    g_signal_emit_by_name(color, "color-set");
+    failed_apply(dialog, path, backup);
+    g_assert_cmpint(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(width)), ==, 64);
+    /* Autosave still sees committed settings, not the failed candidate. */
+    g_signal_emit_by_name(plugin, "save");
+    GKeyFile *file = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL));
+    g_assert_cmpint(g_key_file_get_integer(file, "Graphs", "width", NULL), ==, 0);
+    g_assert_cmpint(g_key_file_get_integer(file, "Appearance", "theme", NULL), ==, 0);
+    /* Fixing the filesystem permits Apply again, with all edits preserved. */
+    gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
+    g_assert_false(gtk_widget_get_visible(dialog));
+    g_object_unref(dialog);
+    g_assert_true(g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL));
+    g_assert_cmpint(g_key_file_get_integer(file, "Graphs", "width", NULL), ==, 64);
+    g_assert_cmpuint(g_key_file_get_uint64(file, "Appearance-0", "series1", NULL), ==, 0x33669980u);
+    /* A failed subsequent Apply must still allow Cancel to discard its edits. */
+    g_signal_emit_by_name(plugin, "configure-plugin");
+    dialog = preferences_dialog(); g_assert_nonnull(dialog); g_object_ref(dialog);
+    width = gtk_grid_get_child_at(GTK_GRID(preferences_page(dialog, 0)), 1, 0);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(width), 96);
+    failed_apply(dialog, path, backup);
+    gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_CANCEL);
+    g_assert_false(gtk_widget_get_visible(dialog)); g_object_unref(dialog);
+    g_signal_emit_by_name(plugin, "save");
+    g_assert_true(g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL));
+    g_assert_cmpint(g_key_file_get_integer(file, "Graphs", "width", NULL), ==, 64);
+    g_key_file_unref(file); g_free(backup);
+    /* Leave Preferences open for the existing removal/lifecycle check. */
+    g_signal_emit_by_name(plugin, "configure-plugin");
+    g_assert_nonnull(preferences_dialog());
+    g_print("Failed Apply: error shown, edits retained, autosave unchanged, retry and Cancel: passed\n");
 }
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
@@ -106,7 +200,9 @@ int main(int argc, char **argv) {
     GKeyFile *settings = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(settings, path, G_KEY_FILE_NONE, NULL));
     g_assert_cmpint(g_key_file_get_integer(settings, "Appearance", "theme", NULL), ==, 0);
-    g_key_file_unref(settings); g_free(path);
+    g_key_file_unref(settings);
+    apply_save_failure_test(plugin, path);
+    g_free(path);
     /* XFCE emits free-data as part of the widget's teardown. */
     gtk_widget_destroy(window);
     g_module_close(module);

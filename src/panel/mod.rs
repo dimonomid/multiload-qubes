@@ -113,12 +113,20 @@ impl Panel {
             host.set_menu_blocked(block);
         }
     }
-    fn save(&self) {
-        if let Some(path) = self.host.as_ref().and_then(Host::save_path) {
-            if let Err(e) = self.config.borrow().save(&path) {
-                eprintln!("Cannot save Multiload settings: {e}");
-            }
-        }
+    fn save_config(&self, config: &Config) -> Result<(), String> {
+        // The standalone preview has no panel settings file to persist.
+        let Some(host) = &self.host else {
+            return Ok(());
+        };
+        let path = host
+            .save_path()
+            .ok_or("Cannot determine the panel settings file location.")?;
+        config
+            .save(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))
+    }
+    fn save(&self) -> Result<(), String> {
+        self.save_config(&self.config.borrow())
     }
     fn tick(&self) {
         self.graphs.borrow_mut().update(self.demo);
