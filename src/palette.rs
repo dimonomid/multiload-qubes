@@ -1,9 +1,9 @@
-//! Renderer palette. Colors cross the C ABI as packed RRGGBBAA integers.
+//! Renderer palettes with packed RRGGBBAA colors.
 use super::*;
 
-// Stable IDs shared with Theme in native/plugin.c and persisted panel settings.
+// Stable built-in IDs persisted in panel settings.
 // Custom draft uses ID 1000 and is not a built-in palette.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum BuiltinTheme {
     Original = 0,
@@ -13,7 +13,7 @@ pub(super) enum BuiltinTheme {
     SolarizedLightGradient = 4,
 }
 impl BuiltinTheme {
-    fn from_id(id: u32) -> Option<Self> {
+    pub(super) fn from_id(id: u32) -> Option<Self> {
         match id {
             0 => Some(Self::Original),
             1 => Some(Self::Tango),
@@ -25,7 +25,7 @@ impl BuiltinTheme {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Palette {
     pub colors: [u32; 7],
     pub border: u32,

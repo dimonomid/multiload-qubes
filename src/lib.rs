@@ -1,6 +1,8 @@
-//! Metrics and Cairo renderer. GTK/XFCE ownership stays in the small C adapter.
+//! Metrics and Cairo renderer, with an optional Rust GTK3 panel runtime.
 mod domain_graph;
 mod palette;
+#[cfg(feature = "panel")]
+mod panel;
 use domain_graph::Metric;
 use palette::source;
 use palette::Palette;

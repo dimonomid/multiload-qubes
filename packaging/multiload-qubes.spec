@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.10.0
+Version:        0.11.1
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,13 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.11.1-1
+- Restore chart button-press events so the XFCE right-click menu opens
+
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.11.0-1
+- Move GTK preferences, theme storage, settings and panel lifecycle into Rust
+- Keep a minimal XFCE C adapter and allow standalone collector builds without GTK
+
 * Thu Oct 29 2026 Multiload for Qubes contributors - 0.10.0-1
 - Add named custom theme files, draft protection and save/rename/delete controls
 - Restore flat Solarized Light and add Solarized Light Gradient as a separate preset

@@ -6,7 +6,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="multiload-qubes-gui-") as tmp:
-    env = dict(os.environ, XDG_CONFIG_HOME=tmp, XDG_CACHE_HOME=tmp, G_DEBUG="fatal-warnings")
+    env = dict(os.environ, XDG_CONFIG_HOME=tmp, XDG_CACHE_HOME=tmp, G_DEBUG="fatal-warnings", LC_ALL="C.UTF-8")
     for command in [
         ["build/multiload-qubes-preview", "--self-test"],
         ["build/panel-smoke", str(root / "build/libmultiload-qubes.so")],

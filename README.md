@@ -2,8 +2,10 @@
 
 A native GTK3 XFCE panel plugin with scrolling host/per-qube CPU, host/per-qube RAM, network, swap and disk I/O graphs.
 All charts are one panel item: move them together using XFCE's normal menu.
-Rust implements collection, snapshot validation, history and Cairo rendering; a small C
-adapter handles GTK3/XFCE registration, events and settings. The collector CLI uses clap; Cargo.lock pins dependency versions. Slint is not required.
+Rust implements collection, snapshot validation, history, Cairo rendering, GTK3
+preferences, panel settings and custom theme storage. A small C adapter only
+registers the XFCE plugin and bridges its panel API. The collector CLI uses clap;
+Cargo.lock pins dependency versions. Slint is not required.
 
 ## Graphs
 
@@ -70,6 +72,20 @@ make
 make test
 ```
 
+GTK3 bindings are enabled by the optional Cargo `panel` feature. A standalone
+collector build does not enable it:
+
+```bash
+cargo build --release --offline --no-default-features --bin multiload-qubes-collector
+```
+
+`make` builds the collector first, then the panel library with `--features panel`,
+and keeps a separate panel archive in `build/` for the C adapter to link. This
+prevents standalone Cargo builds from replacing the panel archive with a library
+that has GTK disabled. The UI modules live in `src/panel/`: preferences, config,
+theme files, runtime and preview/integration checks. Only `native/plugin.c` uses
+the XFCE C API.
+
 Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
 Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.
 These test the shared plugin entry point and widget lifecycle, as well as settings
@@ -78,6 +94,7 @@ Rust/Cargo and the development dependencies have already been installed on this
 development machine. The plugin is not installed in your panel automatically.
 
 Run `build/multiload-qubes-preview` for a clearly labelled **simulated** preview.
+Add `--preferences` to inspect the Rust preferences dialog.
 It does not require Xen or alter the panel. For an image without a display:
 
 ```bash
@@ -94,7 +111,7 @@ make rpm
 To put temporary RPM build files on a separate filesystem:
 
 ```bash
-make rpm RPM_BUILD_DIR=/tmp/multiload-qubes-rpm-build
+make rpm
 ```
 
 RPMs and a source RPM are written under `build/rpm/`. The source RPM bundles
@@ -109,7 +126,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.10.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.11.1-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -367,7 +384,7 @@ budget. A `--once` snapshot cannot derive per-qube CPU rates from one sample.
 Xen scheduling weights, affinity and caps are not changed; the chart does not
 measure runnable time denied by Xen or work performed in dom0 on a qube's behalf.
 
-After installing v0.10.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.11.1, restart the collector and run `xfce4-panel -r`. Compare a
 CPU-loaded qube with its online vCPU count in `xl list`; a four-vCPU qube at 100%
 contributes 25% to a sixteen-logical-CPU host. Live Xen reporting still needs
 checking in dom0; fixtures cover normalization, online counts, resets, restart,
@@ -392,7 +409,7 @@ allocation and unknown usage. Guest totals are not replaced with configured
 maximum memory or Xen allocation. Reclaimable memory is accounted for through
 `MemAvailable`; swap is excluded.
 
-After installing v0.10.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.11.1, restart the collector and run `xfce4-panel -r`. Compare a
 qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
 its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
 Qube RAM needs MQ5 data from the updated collector.
@@ -451,7 +468,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.10.0, restart the collector and panel using the commands above.
+After installing v0.11.1, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid
