@@ -49,7 +49,14 @@ pub fn run() -> ExitCode {
         for _ in 0..400 {
             graphs.update(true);
         }
-        super::draw_graphs(&graphs, &context, width, height, [true; 7], false);
+        super::draw_graphs(
+            &graphs,
+            &context,
+            width,
+            height,
+            &super::config::CHART_KINDS,
+            false,
+        );
         return match std::fs::File::create(path)
             .map_err(|e| e.to_string())
             .and_then(|mut file| surface.write_to_png(&mut file).map_err(|e| e.to_string()))
@@ -193,12 +200,74 @@ fn screenshot(prefs: &Preferences) {
         .write_to_png(&mut std::fs::File::create("build/appearance-preferences.png").unwrap())
         .unwrap();
 }
+fn chart_order_test() {
+    let panel = Panel::new(None, true);
+    let editor = prefs(&panel);
+    assert!(!editor.move_up.is_sensitive());
+    assert!(!editor.enable_chart.is_sensitive());
+    assert!(editor.move_down.is_sensitive());
+    for index in [1, 2] {
+        editor.move_down.emit_clicked();
+        assert_eq!(editor.chart_list.selected_row().unwrap().index(), index);
+        assert!(editor.move_down.is_sensitive());
+        assert!(editor.move_up.is_sensitive());
+    }
+    editor.move_up.emit_clicked();
+    assert_eq!(editor.chart_list.selected_row().unwrap().index(), 1);
+    editor.disable_chart.emit_clicked();
+    assert_eq!(editor.available.children().len(), 1);
+    assert_eq!(editor.chart_list.children().len(), 6);
+    assert!(editor.enable_chart.is_sensitive());
+    editor.enable_chart.emit_clicked();
+    assert_eq!(editor.chart_list.selected_row().unwrap().index(), 6);
+    assert!(!editor.move_down.is_sensitive());
+    editor.disable_chart.emit_clicked();
+    assert_eq!(panel.config.borrow().order, Config::default().order);
+    editor.dialog.response(gtk::ResponseType::Ok);
+    assert_eq!(panel.config.borrow().order, [1, 2, 3, 4, 5, 6, 0]);
+    assert!(!panel.config.borrow().enabled[0]);
+    let kinds = panel.config.borrow().visible_kinds();
+    for vertical in [false, true] {
+        let (w, h) = if vertical { (48, 288) } else { (288, 48) };
+        for (i, &kind) in kinds.iter().enumerate() {
+            let (x, y) = if vertical {
+                (0, i as i32 * 48)
+            } else {
+                (i as i32 * 48, 0)
+            };
+            assert_eq!(
+                super::chart_at(&kinds, vertical, w, h, x, y).unwrap().0,
+                kind
+            );
+        }
+    }
+    let editor = prefs(&panel);
+    editor.enable_chart.emit_clicked();
+    editor.move_up.emit_clicked();
+    editor.dialog.response(gtk::ResponseType::Cancel);
+    assert_eq!(panel.config.borrow().order, [1, 2, 3, 4, 5, 6, 0]);
+    assert!(!panel.config.borrow().enabled[0]);
+    let editor = prefs(&panel);
+    for _ in 0..5 {
+        editor.disable_chart.emit_clicked();
+    }
+    assert_eq!(editor.chart_list.children().len(), 1);
+    assert!(!editor.disable_chart.is_sensitive());
+    assert!(!editor.move_up.is_sensitive());
+    assert!(!editor.move_down.is_sensitive());
+    editor.disable_chart.emit_clicked();
+    assert_eq!(editor.chart_list.children().len(), 1);
+    editor.dialog.response(gtk::ResponseType::Cancel);
+    panel.shutdown();
+    println!("Chart lists: repeated moves, enable/disable, last-chart protection, Apply/Cancel and tooltips: passed");
+}
 fn self_test() {
     use gtk::ResponseType;
     let gradient = Selection::Builtin(BuiltinTheme::LightGradient).id();
     let light = Selection::Builtin(BuiltinTheme::SolarizedLight).id();
     let tango = Selection::Builtin(BuiltinTheme::Tango).id();
     let draft = Selection::Draft { source: None }.id();
+    chart_order_test();
     renderer_test();
     let panel = Panel::new(None, true);
     let prefs = prefs(&panel);
@@ -327,7 +396,10 @@ fn self_test() {
     screenshot(&prefs);
     prefs.width.set_value(64.);
     prefs.interval.set_value(500.);
-    prefs.enabled[0].set_active(false);
+    prefs
+        .chart_list
+        .select_row(prefs.chart_list.row_at_index(0).as_ref());
+    prefs.disable_chart.emit_clicked();
     prefs.dialog.response(ResponseType::Ok);
     panel.config.borrow().save(&path).unwrap();
     let loaded = Config::load(&path).unwrap();
@@ -353,10 +425,10 @@ fn self_test() {
     assert_eq!(panel.graphs.borrow().palette, committed.appearance.palettes);
     panel.vertical.set(true);
     panel.resize();
-    let on = [true, false, true, false, true, true, false];
-    assert_eq!(super::chart_at(on, false, 130, 49, 32, 0).unwrap().0, 1);
-    assert!(super::chart_at(on, false, 130, 49, 128, 0).is_none());
-    assert_eq!(super::chart_at(on, true, 49, 130, 0, 64).unwrap().0, 2);
+    let kinds = [0, 1, 2, 3];
+    assert_eq!(super::chart_at(&kinds, false, 130, 49, 32, 0).unwrap().0, 1);
+    assert!(super::chart_at(&kinds, false, 130, 49, 128, 0).is_none());
+    assert_eq!(super::chart_at(&kinds, true, 49, 130, 0, 64).unwrap().0, 2);
     ThemeStore::load().0.delete(&id).unwrap();
     panel.shutdown();
     for action in 0..2 {
@@ -386,14 +458,7 @@ fn renderer_test() {
         let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 20, 20).unwrap();
         {
             let cr = cairo::Context::new(&surface).unwrap();
-            super::draw_graphs(
-                &graphs,
-                &cr,
-                20,
-                20,
-                super::config::CHART_KINDS.map(|k| k == kind),
-                false,
-            );
+            super::draw_graphs(&graphs, &cr, 20, 20, &[kind], false);
         }
         surface.flush();
         let data = surface.data().unwrap();

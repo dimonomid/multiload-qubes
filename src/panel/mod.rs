@@ -5,7 +5,7 @@ mod preferences;
 pub(crate) mod preview;
 mod themes;
 
-use config::{Config, CHART_KINDS};
+use config::Config;
 use ffi::Host;
 use gtk::prelude::*;
 use std::{
@@ -62,7 +62,7 @@ impl Panel {
                     context,
                     widget.allocated_width(),
                     widget.allocated_height(),
-                    p.config.borrow().enabled,
+                    &p.config.borrow().visible_kinds(),
                     p.vertical.get(),
                 );
             }
@@ -79,7 +79,7 @@ impl Panel {
                     return false;
                 }
                 let Some((kind, rect)) = chart_at(
-                    p.config.borrow().enabled,
+                    &p.config.borrow().visible_kinds(),
                     p.vertical.get(),
                     widget.allocated_width(),
                     widget.allocated_height(),
@@ -211,22 +211,22 @@ fn draw_graphs(
     cr: &gtk::cairo::Context,
     width: i32,
     height: i32,
-    enabled: [bool; 7],
+    kinds: &[usize],
     vertical: bool,
 ) {
-    if let Err(error) = g.draw(cr, width, height, enabled, vertical) {
+    if let Err(error) = g.draw(cr, width, height, kinds, vertical) {
         eprintln!("Cannot draw Multiload graphs: {error}");
     }
 }
 fn chart_at(
-    enabled: [bool; 7],
+    kinds: &[usize],
     vertical: bool,
     width: i32,
     height: i32,
     x: i32,
     y: i32,
 ) -> Option<(usize, gtk::gdk::Rectangle)> {
-    let count = enabled.iter().filter(|v| **v).count() as i32;
+    let count = kinds.len() as i32;
     if count == 0 || x < 0 || y < 0 || x >= width || y >= height {
         return None;
     }
@@ -239,11 +239,7 @@ fn chart_at(
         return None;
     }
     let index = if vertical { y / h } else { x / w };
-    let kind = CHART_KINDS
-        .into_iter()
-        .zip(enabled)
-        .filter_map(|(kind, on)| on.then_some(kind))
-        .nth(index as usize)?;
+    let kind = *kinds.get(index as usize)?;
     Some((
         kind,
         gtk::gdk::Rectangle::new(

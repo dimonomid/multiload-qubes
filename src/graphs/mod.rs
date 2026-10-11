@@ -322,13 +322,13 @@ impl Graphs {
         cr: &cairo::Context,
         width: i32,
         height: i32,
-        enabled: [bool; 7],
+        kinds: &[usize],
         vertical: bool,
     ) -> Result<(), cairo::Error> {
         if width < 4 || height < 4 {
             return Ok(());
         }
-        let count = enabled.iter().filter(|v| **v).count() as i32;
+        let count = kinds.len() as i32;
         if count == 0 {
             return Ok(());
         }
@@ -343,19 +343,14 @@ impl Graphs {
         cr.save()?;
         cr.rectangle(0., 0., width as f64, height as f64);
         cr.clip();
-        for (index, (_, kind)) in enabled
-            .into_iter()
-            .zip([0, 6, 1, 5, 2, 3, 4])
-            .filter(|(on, _)| *on)
-            .enumerate()
-        {
+        for (index, &kind) in kinds.iter().enumerate() {
             if index > 0 {
                 cr.translate(
                     if vertical { 0. } else { cw as f64 },
                     if vertical { ch as f64 } else { 0. },
                 );
             }
-            self.chart(cr, cw, ch, kind)?;
+            self.chart(cr, cw, ch, kind as i32)?;
         }
         cr.restore()
     }

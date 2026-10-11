@@ -146,8 +146,11 @@ sudo systemctl enable --now multiload-qubes-collector.service
 
 Add **Multiload for Qubes** through **Panel Preferences → Items → Add**. It is a
 native panel item, not a notification-area icon. Right-click → Properties changes
-chart width (0 = square), refresh interval, and visible charts. Settings persist
-per panel instance. Hovering a chart shows only its own metrics; moving between
+chart width (0 = square), refresh interval, and visible charts. In General,
+move charts between Available and Enabled using > / <. Use Move up / Move down
+to reorder the enabled charts, then Apply. Newly enabled charts go at the end;
+at least one chart must stay enabled. Settings persist per panel instance.
+Hovering a chart shows only its own metrics; moving between
 charts switches the tooltip. Network and disk tooltips also state the speed
 represented by a full chart, using the combined in/out or read/write scale for
 the currently visible history. Resizing a chart updates that scale. Vertical

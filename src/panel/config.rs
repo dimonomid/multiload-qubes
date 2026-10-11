@@ -111,6 +111,7 @@ pub struct Config {
     pub width: i32,
     pub interval: u32,
     pub enabled: [bool; 7],
+    pub order: [usize; 7],
     pub appearance: Appearance,
 }
 impl Default for Config {
@@ -119,12 +120,29 @@ impl Default for Config {
             width: 0,
             interval: 1000,
             enabled: [true; 7],
+            order: [0, 1, 2, 3, 4, 5, 6],
             appearance: Appearance::default(),
         }
     }
 }
 impl Config {
+    pub fn visible_kinds(&self) -> Vec<usize> {
+        self.order
+            .iter()
+            .copied()
+            .filter(|&i| self.enabled[i])
+            .map(|i| CHART_KINDS[i])
+            .collect()
+    }
+
     pub fn normalize(&mut self) {
+        let mut order = Vec::with_capacity(7);
+        for i in self.order.into_iter().chain(0..7) {
+            if i < 7 && !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        self.order = order.try_into().unwrap();
         self.width = self.width.clamp(0, 512);
         if (1..4).contains(&self.width) {
             self.width = 4;
@@ -150,6 +168,20 @@ impl Config {
         };
         for (i, key) in CHART_KEYS.iter().enumerate() {
             config.enabled[i] = file.boolean("Graphs", key).unwrap_or(true);
+        }
+        if let Ok(order) = file.string("Graphs", "order") {
+            config.order = [usize::MAX; 7];
+            for (slot, index) in config
+                .order
+                .iter_mut()
+                .zip(order.split(',').filter_map(|key| {
+                    CHART_KEYS
+                        .iter()
+                        .position(|candidate| *candidate == key.trim())
+                }))
+            {
+                *slot = index;
+            }
         }
         let source = file
             .string("Appearance", "custom_theme_id")
@@ -178,6 +210,11 @@ impl Config {
     }
     pub fn encode(&self) -> KeyFile {
         let file = KeyFile::new();
+        file.set_string(
+            "Graphs",
+            "order",
+            &self.order.map(|i| CHART_KEYS[i]).join(","),
+        );
         file.set_integer("Graphs", "width", self.width);
         file.set_integer("Graphs", "interval_ms", self.interval as i32);
         for (key, value) in CHART_KEYS.iter().zip(self.enabled) {
@@ -231,6 +268,32 @@ fn write_palettes(file: &KeyFile, prefix: &str, palettes: &Palettes) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chart_order_roundtrip_keeps_disabled_positions() {
+        let config = Config {
+            order: [6, 0, 4, 2, 1, 3, 5],
+            enabled: [true, false, true, true, true, true, false],
+            ..Config::default()
+        };
+        let mut loaded = Config::decode(&config.encode());
+        assert_eq!(loaded, config);
+        assert_eq!(loaded.visible_kinds(), vec![0, 2, 1, 5, 3]);
+        loaded.enabled[6] = true;
+        assert_eq!(loaded.visible_kinds()[0], CHART_KINDS[6]);
+    }
+    #[test]
+    fn missing_or_invalid_chart_orders_keep_every_chart_once() {
+        let file = KeyFile::new();
+        assert_eq!(Config::decode(&file).order, Config::default().order);
+        file.set_string("Graphs", "order", "disk,cpu,disk,unknown,ram");
+        assert_eq!(Config::decode(&file).order, [6, 0, 2, 1, 3, 4, 5]);
+        let mut config = Config {
+            order: [99, 4, 4, 2, 2, 0, 99],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(config.order, [4, 2, 0, 1, 3, 5, 6]);
+    }
     #[test]
     fn existing_settings_and_draft_source_roundtrip() {
         let file = KeyFile::new();

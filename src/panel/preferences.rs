@@ -17,7 +17,13 @@ pub(super) struct Preferences {
     pub(super) notebook: gtk::Notebook,
     pub(super) width: gtk::SpinButton,
     pub(super) interval: gtk::SpinButton,
-    pub(super) enabled: [gtk::CheckButton; 7],
+    pub(super) available: gtk::ListBox,
+    pub(super) chart_list: gtk::ListBox,
+    pub(super) enable_chart: gtk::Button,
+    pub(super) disable_chart: gtk::Button,
+    chart_rows: [gtk::ListBoxRow; 7],
+    pub(super) move_up: gtk::Button,
+    pub(super) move_down: gtk::Button,
     pub(super) theme: gtk::ComboBoxText,
     pub(super) chart: gtk::ComboBoxText,
     pub(super) colors: [gtk::ColorButton; 7],
@@ -88,11 +94,32 @@ impl Preferences {
         width.set_value(config.width as f64);
         let interval = gtk::SpinButton::with_range(250., 10000., 250.);
         interval.set_value(config.interval as f64);
-        let enabled = std::array::from_fn(|i| {
-            let button = gtk::CheckButton::with_label(CHART_NAMES[i]);
-            button.set_active(config.enabled[i]);
-            button
+        let available = gtk::ListBox::new();
+        let chart_list = gtk::ListBox::new();
+        for list in [&available, &chart_list] {
+            list.set_selection_mode(gtk::SelectionMode::Single);
+            list.set_size_request(160, 210);
+        }
+        let chart_rows = std::array::from_fn(|i| {
+            let row = gtk::ListBoxRow::new();
+            let name = label(CHART_NAMES[i]);
+            name.set_margin_start(8);
+            name.set_margin_end(8);
+            name.set_margin_top(5);
+            name.set_margin_bottom(5);
+            row.add(&name);
+            row
         });
+        for i in config.order {
+            let list = if config.enabled[i] {
+                &chart_list
+            } else {
+                &available
+            };
+            list.add(&chart_rows[i]);
+        }
+        chart_list.select_row(chart_list.row_at_index(0).as_ref());
+        available.select_row(available.row_at_index(0).as_ref());
         let mut demo = crate::Graphs::new();
         for _ in 0..400 {
             demo.update(true);
@@ -103,7 +130,13 @@ impl Preferences {
             notebook: gtk::Notebook::new(),
             width,
             interval,
-            enabled,
+            available,
+            enable_chart: gtk::Button::with_label(">"),
+            disable_chart: gtk::Button::with_label("<"),
+            chart_list,
+            chart_rows,
+            move_up: gtk::Button::with_label("Move up"),
+            move_down: gtk::Button::with_label("Move down"),
             theme,
             chart,
             colors: std::array::from_fn(|_| {
@@ -154,16 +187,34 @@ impl Preferences {
         general.attach(&self.width, 1, 0, 1, 1);
         general.attach(&label("Update interval (ms)"), 0, 1, 1, 1);
         general.attach(&self.interval, 1, 1, 1, 1);
-        for (i, button) in self.enabled.iter().enumerate() {
-            general.attach(
-                button,
-                (i % 2) as i32,
-                2 + (i / 2) as i32,
-                if i == 6 { 2 } else { 1 },
-                1,
-            );
+        let charts = gtk::Grid::builder()
+            .column_spacing(12)
+            .row_spacing(6)
+            .build();
+        charts.attach(&label("Available charts"), 0, 0, 1, 1);
+        charts.attach(&label("Enabled charts"), 2, 0, 1, 1);
+        for (list, column) in [(&self.available, 0), (&self.chart_list, 2)] {
+            let frame = gtk::Frame::new(None);
+            frame.add(list);
+            charts.attach(&frame, column, 1, 1, 1);
         }
-        general.attach(&label("Per-qube charts: 100% = one domain's capacity.\nColors can be changed in Appearance."), 0, 6, 2, 1);
+        let transfers = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        self.enable_chart
+            .set_tooltip_text(Some("Enable selected chart"));
+        self.disable_chart
+            .set_tooltip_text(Some("Disable selected chart"));
+        transfers.pack_start(&self.enable_chart, false, false, 0);
+        transfers.pack_start(&self.disable_chart, false, false, 0);
+        transfers.set_valign(gtk::Align::Center);
+        charts.attach(&transfers, 1, 1, 1, 1);
+        let moves = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        moves.pack_start(&self.move_up, false, false, 0);
+        moves.pack_start(&self.move_down, false, false, 0);
+        moves.set_valign(gtk::Align::Start);
+        charts.attach(&moves, 3, 1, 1, 1);
+        general.attach(&charts, 0, 2, 2, 1);
+        self.update_move_buttons();
+        general.attach(&label("Per-qube charts: 100% = one domain's capacity.\nColors can be changed in Appearance."), 0, 3, 2, 1);
         let appearance = grid();
         appearance.attach(&label("Theme (applies to all charts)"), 0, 0, 1, 1);
         appearance.attach(&self.theme, 1, 0, 2, 1);
@@ -203,6 +254,31 @@ impl Preferences {
         self.dialog.content_area().add(&self.notebook);
     }
     fn connect(self: &Rc<Self>) {
+        for list in [&self.available, &self.chart_list] {
+            let weak = Rc::downgrade(self);
+            list.connect_row_selected(move |_, _| {
+                if let Some(p) = weak.upgrade() {
+                    p.update_move_buttons();
+                }
+            });
+        }
+        for (button, enable) in [(&self.enable_chart, true), (&self.disable_chart, false)] {
+            let weak = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                if let Some(p) = weak.upgrade() {
+                    p.transfer_chart(enable);
+                }
+            });
+        }
+        for (button, offset) in [(&self.move_up, -1), (&self.move_down, 1)] {
+            let weak = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                if let Some(p) = weak.upgrade() {
+                    p.move_chart(offset);
+                }
+            });
+        }
+
         let weak = Rc::downgrade(self);
         self.dialog.connect_response(move |_, response| {
             if let Some(p) = weak.upgrade() {
@@ -326,8 +402,7 @@ impl Preferences {
                     }
                 }
                 let kind = p.chart_kind();
-                let on = CHART_KINDS.map(|k| k == kind);
-                super::draw_graphs(&p.demo.borrow(), cr, w, h, on, false);
+                super::draw_graphs(&p.demo.borrow(), cr, w, h, &[kind], false);
             }
             glib::Propagation::Proceed
         });
@@ -409,6 +484,56 @@ impl Preferences {
         );
         self.updating.set(false);
     }
+    fn update_move_buttons(&self) {
+        let index = self.chart_list.selected_row().map(|row| row.index());
+        self.move_up.set_sensitive(index.is_some_and(|i| i > 0));
+        let count = self.chart_list.children().len() as i32;
+        self.move_down
+            .set_sensitive(index.is_some_and(|i| i + 1 < count));
+        self.enable_chart
+            .set_sensitive(self.available.selected_row().is_some());
+        self.disable_chart
+            .set_sensitive(index.is_some() && count > 1);
+    }
+    fn move_chart(&self, offset: i32) {
+        let Some(row) = self.chart_list.selected_row() else {
+            return;
+        };
+        let target = row.index() + offset;
+        if !(0..self.chart_list.children().len() as i32).contains(&target) {
+            return;
+        }
+        self.chart_list.unselect_row(&row);
+        self.chart_list.remove(&row);
+        self.chart_list.insert(&row, target);
+        row.show_all();
+        self.chart_list.select_row(Some(&row));
+        self.update_move_buttons();
+    }
+    fn transfer_chart(&self, enable: bool) {
+        let (source, destination) = if enable {
+            (&self.available, &self.chart_list)
+        } else {
+            (&self.chart_list, &self.available)
+        };
+        if !enable && source.children().len() <= 1 {
+            return;
+        }
+        let Some(row) = source.selected_row() else {
+            return;
+        };
+        let index = row.index();
+        source.unselect_row(&row);
+        source.remove(&row);
+        destination.add(&row);
+        row.show_all();
+        destination.select_row(Some(&row));
+        let next = source
+            .row_at_index(index)
+            .or_else(|| source.row_at_index(index - 1));
+        source.select_row(next.as_ref());
+        self.update_move_buttons();
+    }
     fn apply(&self) -> Result<(), String> {
         let owner = self
             .owner
@@ -418,7 +543,21 @@ impl Preferences {
         let mut config = owner.config.borrow().clone();
         config.width = self.width.value_as_int();
         config.interval = self.interval.value_as_int() as u32;
-        config.enabled = std::array::from_fn(|i| self.enabled[i].is_active());
+        config.enabled = std::array::from_fn(|i| {
+            self.chart_rows[i].parent().as_ref() == Some(self.chart_list.upcast_ref())
+        });
+        let mut order = Vec::with_capacity(7);
+        for list in [&self.chart_list, &self.available] {
+            for row in list.children() {
+                order.push(
+                    self.chart_rows
+                        .iter()
+                        .position(|candidate| candidate.upcast_ref::<gtk::Widget>() == &row)
+                        .unwrap(),
+                );
+            }
+        }
+        config.order = order.try_into().unwrap();
         config.appearance = self.editor.borrow().clone();
         config.normalize();
         // Commit only after persistence succeeds: failures leave the current
@@ -427,6 +566,8 @@ impl Preferences {
         *owner.config.borrow_mut() = config;
         self.accepted.set(true);
         owner.resize();
+        owner.area.queue_draw();
+        owner.area.trigger_tooltip_query();
         owner.restart_timer();
         Ok(())
     }
