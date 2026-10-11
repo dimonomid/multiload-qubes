@@ -15,7 +15,7 @@ COLLECTOR = target/release/multiload-qubes-collector
 .PHONY: all test check gui-test install rpm clean
 all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR)
 
-$(RUSTLIB) $(COLLECTOR) &: Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
+$(RUSTLIB) $(COLLECTOR) &: Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
 	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector
 	$(CARGO) build --release --offline --features panel --lib
 	cp target/release/libmultiload_qubes.a $(RUSTLIB)

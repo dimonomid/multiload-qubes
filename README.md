@@ -83,8 +83,10 @@ cargo build --release --offline --no-default-features --bin multiload-qubes-coll
 and keeps a separate panel archive in `build/` for the C adapter to link. This
 prevents standalone Cargo builds from replacing the panel archive with a library
 that has GTK disabled. The UI modules live in `src/panel/`: preferences, config,
-theme files, runtime and preview/integration checks. Only `native/plugin.c` uses
-the XFCE C API.
+theme files, runtime and preview/integration checks. Graph history, Rust-string
+tooltips and typed Cairo drawing live in `src/graphs/`. The panel calls that Rust
+API directly; there is no separate graph C API or raw Cairo-pointer interface.
+Only `native/plugin.c` uses the XFCE C API.
 
 Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
 Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.

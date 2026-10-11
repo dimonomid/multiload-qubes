@@ -1,5 +1,4 @@
 //! Renderer palettes with packed RRGGBBAA colors.
-use super::*;
 
 // Stable built-in IDs persisted in panel settings.
 // Custom draft uses ID 1000 and is not a built-in palette.
@@ -88,9 +87,8 @@ impl Palette {
     }
 }
 
-pub(super) unsafe fn source(cr: *mut c_void, color: u32) {
-    cairo_set_source_rgba(
-        cr,
+pub(super) fn source(cr: &cairo::Context, color: u32) {
+    cr.set_source_rgba(
         (color >> 24) as f64 / 255.0,
         ((color >> 16) & 255) as f64 / 255.0,
         ((color >> 8) & 255) as f64 / 255.0,
@@ -106,49 +104,9 @@ pub(super) fn mix(a: u32, b: u32, t: f64) -> u32 {
     })
 }
 
-/// # Safety
-/// `g` must be a live graph handle on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_palette_get(g: *const Graphs, kind: u32, field: u32) -> u32 {
-    let Some(p) = g.as_ref().and_then(|g| g.palette.get(kind as usize)) else {
-        return 0;
-    };
-    if field == 7 {
-        p.border
-    } else {
-        p.colors.get(field as usize).copied().unwrap_or(0)
-    }
-}
-/// # Safety
-/// `g` must be a live, exclusively borrowed graph handle on the GTK thread.
-#[no_mangle]
-pub unsafe extern "C" fn mq_palette_set(g: *mut Graphs, kind: u32, field: u32, value: u32) {
-    let Some(p) = g.as_mut().and_then(|g| g.palette.get_mut(kind as usize)) else {
-        return;
-    };
-    if field == 7 {
-        p.border = value.min(16);
-    } else if let Some(color) = p.colors.get_mut(field as usize) {
-        *color = value;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn mq_palette_preset(preset: u32, kind: u32, field: u32) -> u32 {
-    let p = Palette::preset(
-        BuiltinTheme::from_id(preset).unwrap_or(BuiltinTheme::Original),
-        kind as usize,
-    );
-    if field == 7 {
-        p.border
-    } else {
-        p.colors.get(field as usize).copied().unwrap_or(0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::mix;
     #[test]
     fn rgba_interpolation_preserves_transparency_and_endpoints() {
         assert_eq!(mix(0xFF000000, 0x0000FFFF, 0.0), 0xFF000000);

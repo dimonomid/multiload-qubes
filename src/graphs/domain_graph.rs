@@ -165,19 +165,19 @@ fn point_y(percent: f64, height: f64) -> f64 {
 }
 
 impl Graphs {
-    pub(super) unsafe fn domain_chart(
+    pub(super) fn domain_chart(
         &self,
-        cr: *mut c_void,
+        cr: &cairo::Context,
         width: i32,
         height: i32,
         palette: &Palette,
         metric: Metric,
-    ) {
+    ) -> Result<(), cairo::Error> {
         let (w, h) = (width as f64, height as f64);
-        cairo_save(cr);
-        cairo_set_antialias(cr, 1); // CAIRO_ANTIALIAS_NONE, from cairo.h.
-        cairo_rectangle(cr, 1.0, 1.0, w - 2.0, h - 2.0);
-        cairo_clip(cr);
+        cr.save()?;
+        cr.set_antialias(cairo::Antialias::None);
+        cr.rectangle(1.0, 1.0, w - 2.0, h - 2.0);
+        cr.clip();
         let n = self.history.len().min((width - 2) as usize);
         let samples: Vec<_> = self
             .history
@@ -195,14 +195,14 @@ impl Graphs {
             {
                 let top = point_y(peak, h) - 0.5;
                 source(cr, palette.colors[4]);
-                cairo_rectangle(cr, left + i as f64, top, 1.0, h - 1.0 - top);
-                cairo_fill(cr);
+                cr.rectangle(left + i as f64, top, 1.0, h - 1.0 - top);
+                cr.fill()?;
             }
             if swap.is_none_or(|s| s.entries.len() < s.expected as usize) {
-                rect(cr, palette.colors[6], left + i as f64, h - 3.0, 1.0, 2.0);
+                rect(cr, palette.colors[6], left + i as f64, h - 3.0, 1.0, 2.0)?;
             }
         }
-        cairo_set_line_width(cr, 1.0);
+        cr.set_line_width(1.0);
         for trace in traces(&samples, metric).values() {
             let rgb = color(trace.name, palette.colors[3], palette.colors[1]);
             source(cr, rgb);
@@ -211,21 +211,21 @@ impl Graphs {
                 if let Some(percent) = percent {
                     let point = (left + i as f64 + 0.5, point_y(*percent, h));
                     if drawing {
-                        cairo_line_to(cr, point.0, point.1);
+                        cr.line_to(point.0, point.1);
                     } else {
                         // Also show an isolated measurement with no adjacent sample.
-                        rect(cr, rgb, point.0 - 0.5, point.1 - 0.5, 1.0, 1.0);
-                        cairo_move_to(cr, point.0, point.1);
+                        rect(cr, rgb, point.0 - 0.5, point.1 - 0.5, 1.0, 1.0)?;
+                        cr.move_to(point.0, point.1);
                     }
                     drawing = true;
                 } else if drawing {
-                    cairo_stroke(cr);
+                    cr.stroke()?;
                     drawing = false;
                 }
             }
-            cairo_stroke(cr);
+            cr.stroke()?;
         }
-        cairo_restore(cr);
+        cr.restore()
     }
 }
 

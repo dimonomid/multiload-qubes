@@ -107,14 +107,10 @@ impl Panel {
                 ) else {
                     return false;
                 };
-                let mut graphs = p.graphs.borrow_mut();
-                let text = unsafe {
-                    crate::mq_tooltip(&mut *graphs, kind as i32, rect.width(), rect.height())
-                };
-                if text.is_null() {
+                let graphs = p.graphs.borrow();
+                let Some(text) = graphs.tooltip(kind, rect.width(), rect.height()) else {
                     return false;
-                }
-                let text = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+                };
                 tooltip.set_text(Some(&text));
                 tooltip.set_tip_area(&rect);
                 true
@@ -238,21 +234,8 @@ fn draw_graphs(
     enabled: [bool; 7],
     vertical: bool,
 ) {
-    unsafe {
-        crate::mq_draw(
-            g,
-            cr.to_raw_none() as *mut c_void,
-            width,
-            height,
-            enabled[0].into(),
-            enabled[1].into(),
-            enabled[2].into(),
-            enabled[3].into(),
-            enabled[4].into(),
-            enabled[5].into(),
-            enabled[6].into(),
-            vertical.into(),
-        );
+    if let Err(error) = g.draw(cr, width, height, enabled, vertical) {
+        eprintln!("Cannot draw Multiload graphs: {error}");
     }
 }
 fn chart_at(
