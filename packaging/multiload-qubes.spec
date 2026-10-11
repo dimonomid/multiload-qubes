@@ -1,5 +1,5 @@
 Name:           multiload-qubes
-Version:        0.11.1
+Version:        0.12.0
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
 License:        GPL-2.0-or-later
@@ -56,6 +56,12 @@ make test
 %{_unitdir}/multiload-qubes-collector.service
 
 %changelog
+* Thu Oct 29 2026 Multiload for Qubes contributors - 0.12.0-1
+- Track actual draft palette changes and preserve their baseline across restarts
+- Replace graph C interfaces with safe Rust and typed Cairo drawing
+- Isolate the XFCE bridge and generate its C header during offline builds
+- Build the development preview as a standalone Rust executable
+
 * Thu Oct 29 2026 Multiload for Qubes contributors - 0.11.1-1
 - Restore chart button-press events so the XFCE right-click menu opens
 
