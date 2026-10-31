@@ -139,7 +139,7 @@ Transfer the resulting matching RPM into dom0 through your normal Qubes file
 transfer procedure. In dom0:
 
 ```bash
-sudo dnf install ./multiload-qubes-0.12.0-1*.rpm
+sudo dnf install ./multiload-qubes-0.1.0-1*.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 ```
 
@@ -409,7 +409,7 @@ budget. A `--once` snapshot cannot derive per-qube CPU rates from one sample.
 Xen scheduling weights, affinity and caps are not changed; the chart does not
 measure runnable time denied by Xen or work performed in dom0 on a qube's behalf.
 
-After installing v0.12.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.1.0, restart the collector and run `xfce4-panel -r`. Compare a
 CPU-loaded qube with its online vCPU count in `xl list`; a four-vCPU qube at 100%
 contributes 25% to a sixteen-logical-CPU host. Live Xen reporting still needs
 checking in dom0; fixtures cover normalization, online counts, resets, restart,
@@ -434,7 +434,7 @@ allocation and unknown usage. Guest totals are not replaced with configured
 maximum memory or Xen allocation. Reclaimable memory is accounted for through
 `MemAvailable`; swap is excluded.
 
-After installing v0.12.0, restart the collector and run `xfce4-panel -r`. Compare a
+After installing v0.1.0, restart the collector and run `xfce4-panel -r`. Compare a
 qube's tooltip percentage with `(MemTotal - MemAvailable) / MemTotal * 100` from
 its `/proc/meminfo`. Existing snapshots remain readable during the upgrade, but
 Qube RAM needs MQ5 data from the updated collector.
@@ -493,7 +493,7 @@ and clear the baseline; journal messages report changed failures and recovery.
 `--once` lists devices but intentionally has unknown disk rates.
 
 Disk I/O is enabled automatically for old settings and can be hidden in Properties.
-After installing v0.12.0, restart the collector and panel using the commands above.
+After installing v0.1.0, restart the collector and panel using the commands above.
 In dom0, compare the tooltip's devices and rates with `iostat -dx 1` if available,
 then read/write a test file in a guest and allow for caching and delayed writes.
 Automated fixtures cover device selection, rates, resets, hotplug and invalid
