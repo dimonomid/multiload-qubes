@@ -72,6 +72,20 @@ and network data. Nothing needs to be installed in the qubes.
 First you need the RPM package either download a pre-built one, or build it
 manually as explained below.
 
+Before copying a pre-built RPM to dom0, verify it in a regular qube using
+[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
+Keep its original filename and place its matching `.sigstore.json` file beside it:
+
+```bash
+cosign verify-blob multiload-qubes-0.1.0-1.fc37.x86_64.rpm \
+  --bundle multiload-qubes-0.1.0-1.fc37.x86_64.rpm.sigstore.json \
+  --certificate-identity 'https://github.com/dimonomid/multiload-qubes/.github/workflows/_sign-binaries.yml@refs/heads/master' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Adjust the filename for your release. This is a separate signature check;
+`dnf` does not verify these Sigstore signatures itself.
+
 With the `multiload-qubes.rpm` already in dom0, run in dom0:
 
 ```bash

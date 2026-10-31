@@ -1,0 +1,62 @@
+name: sign-binaries
+
+on:
+  workflow_call:
+    inputs:
+      artifact_prefix:
+        type: string
+        required: true
+      retention_days:
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    name: Sign RPM and checksums
+    # Another repository must not use this workflow to sign its own files as us.
+    if: github.repository == 'dimonomid/multiload-qubes'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download build files
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-artifacts
+          path: release
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      - name: Sign and verify files
+        env:
+          # Fulcio uses the reusable workflow as the certificate identity.
+          SIGNER_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/_sign-binaries.yml@${{ github.ref }}
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          sha256sum --check SHA256SUMS
+          for file in *.rpm SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
+            cosign verify-blob "$file" \
+              --bundle "$file.sigstore.json" \
+              --certificate-identity "$SIGNER_IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
+
+      - name: Upload signed RPM and checksums
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_prefix }}-artifacts
+          path: release/*
+          overwrite: true
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}

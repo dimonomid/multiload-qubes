@@ -38,11 +38,21 @@ jobs:
       artifact_prefix: release
       retention_days: 1
 
+  sign:
+    needs: binaries
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_sign-binaries.yml
+    with:
+      artifact_prefix: release
+      retention_days: 1
+
   publish:
     name: Attach RPM to release
     needs:
       - release-please
-      - binaries
+      - sign
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -53,7 +63,7 @@ jobs:
           name: release-artifacts
           path: release
 
-      - name: Upload RPM and checksums to GitHub Release
+      - name: Upload RPM, checksums and signatures to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}

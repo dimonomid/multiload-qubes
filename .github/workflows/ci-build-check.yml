@@ -13,3 +13,13 @@ jobs:
       source_ref: ${{ github.sha }}
       artifact_prefix: build-check
       retention_days: 7
+
+  sign:
+    needs: binaries
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_sign-binaries.yml
+    with:
+      artifact_prefix: build-check
+      retention_days: 7
