@@ -8,6 +8,8 @@ PKGS = gtk+-3.0 libxfce4panel-2.0
 CFLAGS ?= -O2 -g
 CPPFLAGS += -Ibuild $(shell pkg-config --cflags $(PKGS))
 LDLIBS += $(shell pkg-config --libs $(PKGS)) -ldl -lpthread -lm
+# Keep the panel library separate: a later collector-only Cargo build can
+# replace the library in target/ with one built without the panel feature.
 RUSTLIB = build/libmultiload_qubes.a
 COLLECTOR = target/release/multiload-qubes-collector
 PREVIEW = target/release/multiload-qubes-preview

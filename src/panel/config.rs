@@ -1,4 +1,7 @@
 //! Per-panel settings and the editor's theme selection, independent of GTK widgets.
+//!
+//! The panel keeps its own copy of the colors, even for a named theme. A draft
+//! also keeps its starting colors so we can tell whether it has unsaved edits.
 use super::themes::ThemeStore;
 use crate::palette::{BuiltinTheme, Palette};
 use glib::KeyFile;
@@ -13,6 +16,8 @@ pub const CHART_NAMES: [&str; 7] = [
     "Per-qube swap",
     "Disk I/O",
 ];
+// Names, keys, enabled flags and order use the settings index. This table maps
+// that index to the renderer/palette index; the two orders are different.
 pub const CHART_KINDS: [usize; 7] = [0, 6, 1, 5, 2, 3, 4];
 const CHART_KEYS: [&str; 7] = [
     "cpu", "qube_cpu", "ram", "qube_ram", "network", "swap", "disk",
@@ -31,6 +36,8 @@ pub type Palettes = [Palette; 7];
 const SAVED_THEME_ID: i32 = 999;
 const DRAFT_THEME_ID: i32 = 1000;
 
+/// A draft may still point to the saved theme it came from. That link allows
+/// Save changes to overwrite the original; it does not mean the draft is saved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     Builtin(BuiltinTheme),
@@ -63,6 +70,7 @@ impl Selection {
 pub struct Appearance {
     pub selection: Selection,
     pub palettes: Palettes,
+    // Keep the starting colors so undoing an edit also clears the discard warning.
     baseline: Palettes,
 }
 impl Default for Appearance {
@@ -96,6 +104,8 @@ impl Appearance {
         };
     }
     pub fn validate_selection(&mut self, themes: &ThemeStore) {
+        // A saved file may have changed or gone away. Keep the panel's colors
+        // as a draft instead of replacing them with the current file contents.
         if let Selection::Saved(id) = &self.selection {
             if themes.find(id).is_none_or(|t| t.palettes != self.palettes) {
                 self.edit();
@@ -137,6 +147,7 @@ impl Config {
 
     pub fn normalize(&mut self) {
         let mut order = Vec::with_capacity(7);
+        // Keep valid positions, drop repeats, then append any missing charts.
         for i in self.order.into_iter().chain(0..7) {
             if i < 7 && !order.contains(&i) {
                 order.push(i);
@@ -170,6 +181,7 @@ impl Config {
             config.enabled[i] = file.boolean("Graphs", key).unwrap_or(true);
         }
         if let Ok(order) = file.string("Graphs", "order") {
+            // Leave unused slots invalid so normalize() fills them at the end.
             config.order = [usize::MAX; 7];
             for (slot, index) in config
                 .order
@@ -199,6 +211,8 @@ impl Config {
             ),
         };
         config.appearance.palettes = read_palettes(file, "Appearance", config.appearance.palettes);
+        // Saving panel settings does not save a named theme. Keep the draft's
+        // starting colors too, so reopening Preferences keeps its unsaved state.
         config.appearance.baseline =
             if matches!(config.appearance.selection, Selection::Draft { .. }) {
                 read_palettes(file, "DraftBaseline", config.appearance.palettes)

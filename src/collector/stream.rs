@@ -1,3 +1,7 @@
+//! Keeps one guest reporting connection open and retries when it fails.
+//!
+//! Each reader owns a worker thread and a local qvm-run process group. The
+//! sampling loop only reads the latest value; it does not wait for guest I/O.
 use super::diagnostics::StderrCapture;
 use super::protocol::{shell_quote, Kind, Reading, Tracker, MEMORY_SCRIPT, NETWORK_SCRIPT};
 use nix::errno::Errno;
@@ -158,6 +162,8 @@ impl Connection {
 }
 
 type SharedConnection = Arc<Mutex<Connection>>;
+/// Owns a reporting worker. Dropping it requests a stop and waits for the worker.
+/// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
     stop: Arc<AtomicBool>,
     connection: SharedConnection,
@@ -219,6 +225,8 @@ impl Reader {
             timing,
         })
     }
+    /// Returns no value while connecting, after a failure, or once a report is
+    /// too old. A stopped reader never returns its last measurement.
     pub fn value(&self) -> Option<Reading> {
         if self.stop.load(Ordering::Relaxed) {
             return None;
@@ -270,6 +278,8 @@ fn session(
         let mut chunk = [0; 4096];
         let mut last = Instant::now();
         let mut budget_time = last;
+        // Allow a short burst of buffered lines, but reject a stream that keeps
+        // sending more than four samples per second. Guest output is untrusted.
         let mut budget = 8.0_f64;
         while !stop.load(Ordering::Relaxed) {
             captured
@@ -296,6 +306,8 @@ fn session(
                         }
                         let reading = tracker.update(&buffer[..end])?;
                         buffer.drain(..=end);
+                        // A valid first network frame has no rate yet, but it
+                        // still proves the reporter is alive.
                         last = now;
                         let recovered = connection
                             .lock()

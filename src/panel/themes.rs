@@ -179,6 +179,8 @@ impl ThemeStore {
         name: &str,
         palettes: Palettes,
     ) -> Result<String, String> {
+        // Use an ID for the filename, not the display name. Renames then keep
+        // panel references valid, and names can contain spaces or slashes.
         let id = id
             .map(str::to_owned)
             .unwrap_or_else(|| glib::uuid_string_random().to_string());
@@ -202,6 +204,8 @@ impl ThemeStore {
             palettes,
         };
         let data = theme.encode().to_data();
+        // Replace the file in one step. Only update the in-memory copy after
+        // the write succeeds, so a failed save leaves the old theme intact.
         gio::File::for_path(self.path(&id)?)
             .replace_contents(
                 data.as_bytes(),

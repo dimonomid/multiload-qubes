@@ -1,3 +1,7 @@
+//! Runs in dom0 and combines Xen counters with reports from running guests.
+//!
+//! Guest readers run on separate threads so a slow or stopped qube does not
+//! block sampling. The panel reads a snapshot file; it never talks to guests.
 mod diagnostics;
 mod disk;
 pub mod protocol;
@@ -37,6 +41,8 @@ pub struct Host {
     pub domains: Vec<Domain>,
 }
 
+/// Tracks counter differences, not CPU load averages.
+/// Host usage uses the host CPU count; per-qube usage uses that qube's vCPUs.
 #[derive(Default)]
 pub struct CpuTracker {
     previous: BTreeMap<(u32, String), (u64, Option<u32>, bool)>,
@@ -58,12 +64,16 @@ impl CpuTracker {
             entries: Vec::new(),
         };
         for domain in &host.domains {
+            // Xen can reuse a domain ID for another qube. Do not subtract its
+            // counters from the old qube's counters.
             let key = (domain.id, domain.identity.clone());
             let reporting = !domain.paused
                 && !domain.shutdown
                 && (domain.id == 0 || active.contains_key(&domain.id));
             if let Some((before, old_vcpus, was_reporting)) = self.previous.get(&key) {
                 delta += domain.cpu_ns.saturating_sub(*before) as f64;
+                // If the vCPU count changed, we do not know its capacity over
+                // this whole interval. Start a fresh per-qube measurement.
                 if reporting
                     && *was_reporting
                     && domain.vcpus == *old_vcpus
@@ -124,6 +134,8 @@ struct Identity {
     name: String,
 }
 fn eligible(host: &Host) -> BTreeMap<u32, Identity> {
+    // Stub domains run device models, not a normal guest reporter. Their RAM
+    // still counts toward host allocation, but its used amount stays unknown.
     let stubs: BTreeSet<_> = host.domains.iter().filter_map(|d| d.stubdom).collect();
     host.domains
         .iter()
@@ -148,8 +160,12 @@ fn eligible(host: &Host) -> BTreeMap<u32, Identity> {
         .collect()
 }
 
+/// Keeps reporters for running qubes and retires them when those qubes change.
+/// The same report supplies guest RAM and swap; they need no separate connections.
 pub struct MemoryPool {
     readers: BTreeMap<u32, (Identity, Reader)>,
+    // Stopping a reader can take time. Keep it here so joining its thread
+    // does not hold up the main sampling loop.
     retired: Vec<Reader>,
     limit: usize,
     factory: fn(&Domain) -> std::io::Result<Reader>,
@@ -185,6 +201,8 @@ impl MemoryPool {
         }
         self.retired.retain(|r| !r.finished());
         for domain in &host.domains {
+            // Count workers still shutting down too, so rapid VM restarts
+            // cannot keep creating more threads and connections.
             if self.readers.len() + self.retired.len() >= self.limit {
                 break;
             }
@@ -298,6 +316,8 @@ pub fn snapshot(
         } else {
             readings.get(&d.id).copied()
         };
+        // Guest reports and Xen allocation are sampled separately. Ballooning
+        // can make a report larger than the current allocation.
         if let Some(n) = usage {
             used = used
                 .checked_add(n.min(d.allocated))
@@ -352,6 +372,8 @@ pub fn publish(path: &Path, text: &str) -> Result<(), String> {
         file.write_all(text.as_bytes())?;
         file.set_permissions(fs::Permissions::from_mode(0o644))?;
         drop(file);
+        // The panel must see either the previous complete snapshot or this one.
+        // Keeping the temporary file beside the destination allows an atomic rename.
         fs::rename(&tmp, path)
     })();
     if result.is_err() {

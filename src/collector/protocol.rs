@@ -1,3 +1,7 @@
+//! Checks guest reports and turns network counters into rates.
+//!
+//! Guest output is not trusted. RAM and swap are in KiB; network counters are
+//! in bytes. Network rates use the guest's monotonic clock, not arrival times.
 use std::collections::BTreeMap;
 
 pub const MEMORY_SCRIPT: &str = include_str!("../../guest/memory.py");
@@ -106,6 +110,8 @@ impl Tracker {
             previous: None,
         }
     }
+    /// Checks one line. `Ok(None)` is a valid report with no rate yet, such as
+    /// the first network sample or a sample after a counter reset.
     pub fn update(&mut self, line: &[u8]) -> Result<Option<Reading>, String> {
         if line.len() > 8192 || !line.is_ascii() {
             return Err("invalid guest frame".into());
@@ -158,6 +164,8 @@ impl Tracker {
             }
         }
         let current = (stamp, fields[2].to_string(), counters);
+        // Even a reset or changed interface set becomes the next starting point.
+        // Return no rate for that interval rather than inventing a traffic spike.
         let previous = self.previous.replace(current.clone());
         let Some((before, boot, old)) = previous else {
             return Ok(None);

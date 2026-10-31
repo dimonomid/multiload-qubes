@@ -50,6 +50,7 @@ impl Panel {
             }
         }
         panel.graphs.borrow_mut().palette = panel.config.borrow().appearance.palettes;
+        // XFCE uses button events from this drawing area to open its menu.
         panel
             .area
             .add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);

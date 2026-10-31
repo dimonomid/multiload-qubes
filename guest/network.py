@@ -4,6 +4,8 @@ boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 # and exits this script. Closing the panel plugin alone does not stop the collector.
 while True:
     rows = []
+    # Count physical NICs only. Adding virtual links would count the same
+    # traffic again as it passes between qubes or through a bridge.
     for dev in sorted(pathlib.Path('/sys/class/net').iterdir()):
         if dev.name == 'lo' or dev.name.startswith('vif') or not (dev / 'device').exists():
             continue

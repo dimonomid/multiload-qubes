@@ -36,6 +36,7 @@ static void orientation_changed(XfcePanelPlugin *plugin, GtkOrientation orientat
     (void)plugin; mq_panel_resize(state, orientation == GTK_ORIENTATION_VERTICAL);
 }
 static void construct(XfcePanelPlugin *plugin) {
+    /* Rust keeps a pointer to this table for the plugin's whole lifetime. */
     static const HostApi api = {
         .size = mq_xfce_size, .vertical = mq_xfce_vertical,
         .attach = mq_xfce_attach, .path = mq_xfce_path, .block = mq_xfce_block

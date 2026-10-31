@@ -8,6 +8,8 @@ while True:
         key, _, value = line.partition(':')
         if key in ('MemTotal', 'MemAvailable', 'SwapTotal', 'SwapFree'):
             fields[key] = int(value.split()[0])
+    # Send the running domain ID so dom0 can reject a report from the wrong VM
+    # after a stop/restart. dom0 supplies the qube name; we do not send one.
     print('M2', domid, fields['MemTotal'], fields['MemAvailable'],
           fields['SwapTotal'], fields['SwapFree'], flush=True)
     time.sleep(1)

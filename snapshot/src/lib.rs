@@ -22,6 +22,8 @@ impl DomainUsage {
     }
 }
 
+/// Reports may be missing. Keep the expected count separate from the entries
+/// so the panel can show partial coverage rather than treating missing qubes as idle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DomainUsageSnapshot {
     /// Number of running, eligible guests plus dom0, including missing reports.
@@ -331,6 +333,8 @@ impl Snapshot {
             self.overhead,
             self.period
         );
+        // Fields have fixed positions. Newer versions need placeholders for
+        // missing earlier metrics, or the reader would read the wrong columns.
         if version != "MQ2" {
             line.push_str(&format!(" {}", encode_domains(self.swap.as_ref())));
         }

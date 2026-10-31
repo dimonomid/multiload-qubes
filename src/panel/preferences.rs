@@ -1,4 +1,8 @@
 //! Preferences and named-theme editing. Signal handlers hold weak Rust owners.
+//!
+//! Color edits update the live panel as a preview. Apply saves panel settings;
+//! Cancel restores the old colors. Named theme files are saved separately and
+//! are not undone by Cancel.
 use super::{
     config::{Appearance, Selection, CHART_KINDS, CHART_NAMES},
     themes::{reserved_name, valid_name, ThemeStore, BUILTINS},
@@ -423,6 +427,8 @@ impl Preferences {
         if self.closed.get() {
             return;
         }
+        // Setting widget values can fire their change handlers. Do not let
+        // those handlers treat this refresh as a new edit.
         self.updating.set(true);
         let editor = self.editor.borrow();
         let k = self.chart_kind();
@@ -503,6 +509,8 @@ impl Preferences {
         if !(0..self.chart_list.children().len() as i32).contains(&target) {
             return;
         }
+        // Clear selection before moving the row, then show and select it again.
+        // Otherwise GTK can leave it unselected and disable the move buttons.
         self.chart_list.unselect_row(&row);
         self.chart_list.remove(&row);
         self.chart_list.insert(&row, target);
@@ -528,6 +536,7 @@ impl Preferences {
         destination.add(&row);
         row.show_all();
         destination.select_row(Some(&row));
+        // Keep a nearby source row selected so repeated add/remove clicks work.
         let next = source
             .row_at_index(index)
             .or_else(|| source.row_at_index(index - 1));
@@ -546,6 +555,8 @@ impl Preferences {
         config.enabled = std::array::from_fn(|i| {
             self.chart_rows[i].parent().as_ref() == Some(self.chart_list.upcast_ref())
         });
+        // Every chart keeps the same row as it moves between lists. Save enabled
+        // charts first; the available list holds the remaining chart positions.
         let mut order = Vec::with_capacity(7);
         for list in [&self.chart_list, &self.available] {
             for row in list.children() {

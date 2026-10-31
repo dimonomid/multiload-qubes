@@ -26,6 +26,8 @@ impl BuiltinTheme {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Palette {
+    // Border, background top/bottom, three series, then missing data.
+    // Per-qube charts use series 1 for lines and series 2 for the peak fill.
     pub colors: [u32; 7],
     pub border: u32,
 }

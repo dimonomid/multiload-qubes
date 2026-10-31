@@ -116,6 +116,8 @@ struct Trace<'a> {
     points: Vec<Option<f64>>,
 }
 
+// Match lines by domain ID and VM identity, not name. A restarted qube must
+// start a new line instead of connecting to its previous run.
 fn traces<'a>(samples: &[Option<&'a Snapshot>], metric: Metric) -> BTreeMap<&'a str, Trace<'a>> {
     let mut traces = BTreeMap::new();
     for (i, sample) in samples.iter().enumerate() {

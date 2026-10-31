@@ -1,3 +1,5 @@
+//! Signal handlers only set a flag. The main loop then stops the workers and
+//! waits for cleanup outside the signal handler.
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::{flag, low_level, SigId};
 use std::io;

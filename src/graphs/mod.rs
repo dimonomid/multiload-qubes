@@ -1,4 +1,8 @@
 //! Graph history, tooltips and typed Cairo rendering.
+//!
+//! Each panel tick adds one history column. The collector may run at a different
+//! interval, so columns can repeat a fresh snapshot. Missing data stays a gap;
+//! it must not look like measured zero usage.
 mod domain_graph;
 use crate::palette::source;
 use crate::palette::Palette;
@@ -158,6 +162,8 @@ fn rect(
 
 impl Graphs {
     fn io_scale(&self, columns: usize, kind: i32) -> f64 {
+        // The two rates are stacked, so the scale must cover their sum. Only
+        // visible history counts; an old peak stops affecting the scale once it scrolls away.
         let peak = self
             .history
             .iter()
