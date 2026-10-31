@@ -251,13 +251,20 @@ impl Graphs {
                         cr,
                         palette.colors[4],
                         x,
-                        h - 1.0 - allocated + unknown,
+                        h - 1.0 - allocated,
                         1.0,
                         (allocated - unknown - used).max(0.0),
                     )?;
-                    // Unknown allocation is red, never represented as measured unused RAM.
+                    // Unknown usage sits above known usage, below confirmed spare RAM.
                     if unknown > 0.0 {
-                        rect(cr, palette.colors[5], x, h - 1.0 - allocated, 1.0, unknown)?;
+                        rect(
+                            cr,
+                            palette.colors[5],
+                            x,
+                            h - 1.0 - used - unknown,
+                            1.0,
+                            unknown,
+                        )?;
                     }
                     rect(cr, palette.colors[3], x, h - 1.0 - used, 1.0, used)?;
                 } else if kind == 2 || kind == 4 {
@@ -365,6 +372,50 @@ impl Graphs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ram_stacks_used_then_unknown_then_spare_without_overlapping_alpha() {
+        let mut graphs = Graphs::new();
+        graphs.update(true);
+        let mut sample = graphs.history.pop_back().unwrap().unwrap();
+        sample.total = 100;
+        sample.allocated = 75;
+        sample.used = 25;
+        sample.unknown = 25;
+        graphs.palette[1].colors = [0, 0, 0, 0x00FF0080, 0x0000FF80, 0xFF000080, 0];
+        for unknown in [25, 0, 75] {
+            sample.unknown = unknown;
+            sample.used = if unknown == 75 { 0 } else { 25 };
+            graphs.history.clear();
+            graphs.history.push_back(Some(sample.clone()));
+            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 8, 100).unwrap();
+            {
+                let context = cairo::Context::new(&surface).unwrap();
+                graphs.draw(&context, 8, 100, &[1], false).unwrap();
+            }
+            let stride = surface.stride() as usize;
+            let pixels = surface.data().unwrap();
+            let pixel = |y: usize| {
+                let offset = y * stride + 7 * 4;
+                u32::from_ne_bytes(pixels[offset..offset + 4].try_into().unwrap())
+            };
+            assert_eq!(pixel(10), 0); // Unallocated space remains transparent.
+            if unknown == 75 {
+                assert_eq!(pixel(35), 0x80800000);
+                assert_eq!(pixel(85), 0x80800000);
+            } else {
+                assert_eq!(pixel(85), 0x80008000);
+                assert_eq!(
+                    pixel(60),
+                    if unknown == 25 {
+                        0x80800000
+                    } else {
+                        0x80000080
+                    }
+                );
+                assert_eq!(pixel(35), 0x80000080);
+            }
+        }
+    }
     #[test]
     fn network_scale_covers_combined_rates_and_expires_old_peaks() {
         let mut graphs = Graphs::new();

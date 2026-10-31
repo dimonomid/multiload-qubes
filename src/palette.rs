@@ -37,7 +37,7 @@ impl Palette {
             return Self::light_gradient(kind);
         }
         let (border, top, first, second, third) = match kind {
-            1 => (0x008042, 0x13261D, 0x03964F, 0x43D18D, 0xD14343),
+            1 => (0x008042, 0x13261D, 0x03964F, 0x43D18D, 0x718078),
             5 => (0x008042, 0x13261D, 0x43D18D, 0x03964F, 0),
             2 => (0x807100, 0x262413, 0xE2CC05, 0x696018, 0),
             3 => (0x510080, 0x1F1326, 0x9C43D1, 0x9C43D1, 0),
@@ -50,23 +50,24 @@ impl Palette {
             border: 0,
         };
         if preset != BuiltinTheme::Original {
-            let (background, edge, blue, green, yellow, orange, purple, red, spare) = match preset {
-                BuiltinTheme::Tango => (
-                    0x2E3436, 0x555753, 0x729FCF, 0x73D216, 0xEDD400, 0xF57900, 0xAD7FA8, 0xEF2929,
-                    0xC8E7AC,
-                ),
-                BuiltinTheme::SolarizedDark => (
-                    0x002B36, 0x586E75, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4, 0xDC322F,
-                    0xA8B86B,
-                ),
-                BuiltinTheme::SolarizedLight => (
-                    0xFDF6E3, 0x93A1A1, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4, 0xDC322F,
-                    0xCBD3A1,
-                ),
-                BuiltinTheme::Original | BuiltinTheme::LightGradient => {
-                    unreachable!("handled above")
-                }
-            };
+            let (background, edge, blue, green, yellow, orange, purple, unknown, spare) =
+                match preset {
+                    BuiltinTheme::Tango => (
+                        0x2E3436, 0x555753, 0x729FCF, 0x73D216, 0xEDD400, 0xF57900, 0xAD7FA8,
+                        0x888A85, 0xC8E7AC,
+                    ),
+                    BuiltinTheme::SolarizedDark => (
+                        0x002B36, 0x586E75, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4,
+                        0x839496, 0xA8B86B,
+                    ),
+                    BuiltinTheme::SolarizedLight => (
+                        0xFDF6E3, 0x93A1A1, 0x268BD2, 0x859900, 0xB58900, 0xCB4B16, 0x6C71C4,
+                        0x657B83, 0xCBD3A1,
+                    ),
+                    BuiltinTheme::Original | BuiltinTheme::LightGradient => {
+                        unreachable!("handled above")
+                    }
+                };
             p.colors[0] = (edge << 8) | 255;
             p.colors[1] = (background << 8) | 255;
             p.colors[2] = p.colors[1];
@@ -83,7 +84,7 @@ impl Palette {
             };
             p.colors[3] = (a << 8) | 255;
             p.colors[4] = (b << 8) | 255;
-            p.colors[5] = (red << 8) | 255;
+            p.colors[5] = (unknown << 8) | 255;
             p.colors[6] = (edge << 8) | 255;
         }
         if matches!(kind, 3 | 5 | 6) {
@@ -104,7 +105,7 @@ impl Palette {
         };
         Self {
             colors: [
-                0x93A1A1FF, 0xF3E5C0FF, 0xFDF6E300, first, second, 0xDC322FFF, 0x93A1A1FF,
+                0x93A1A1FF, 0xF3E5C0FF, 0xFDF6E300, first, second, 0x72776BFF, 0x93A1A1FF,
             ],
             border: 0,
         }
