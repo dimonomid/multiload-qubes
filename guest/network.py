@@ -1,5 +1,7 @@
 import pathlib, time
 boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+# When the collector closes the connection, the next print raises BrokenPipeError
+# and exits this script. Closing the panel plugin alone does not stop the collector.
 while True:
     rows = []
     for dev in sorted(pathlib.Path('/sys/class/net').iterdir()):

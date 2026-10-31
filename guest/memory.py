@@ -1,5 +1,7 @@
 import pathlib, subprocess, time
 domid = subprocess.check_output(['xenstore-read', 'domid'], text=True).strip()
+# When the collector closes the connection, the next print raises BrokenPipeError
+# and exits this script. Closing the panel plugin alone does not stop the collector.
 while True:
     fields = {}
     for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
