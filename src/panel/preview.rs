@@ -204,6 +204,7 @@ fn screenshot(prefs: &Preferences) {
 }
 fn chart_order_test() {
     let panel = Panel::new(None, true);
+    panel.config.borrow_mut().enabled = [true; 7];
     let editor = prefs(&panel);
     assert!(!editor.move_up.is_sensitive());
     assert!(!editor.enable_chart.is_sensitive());

@@ -22,6 +22,7 @@ pub const CHART_KINDS: [usize; 7] = [0, 6, 1, 5, 2, 3, 4];
 const CHART_KEYS: [&str; 7] = [
     "cpu", "qube_cpu", "ram", "qube_ram", "network", "swap", "disk",
 ];
+const DEFAULT_ENABLED: [bool; 7] = [true, false, true, false, true, true, true];
 const COLOR_KEYS: [&str; 7] = [
     "border",
     "background_top",
@@ -129,7 +130,7 @@ impl Default for Config {
         Self {
             width: 0,
             interval: 1000,
-            enabled: [true; 7],
+            enabled: DEFAULT_ENABLED,
             order: [0, 1, 2, 3, 4, 5, 6],
             appearance: Appearance::default(),
         }
@@ -160,7 +161,7 @@ impl Config {
         }
         self.interval = self.interval.clamp(250, 10000);
         if !self.enabled.iter().any(|v| *v) {
-            self.enabled[..3].fill(true);
+            self.enabled = DEFAULT_ENABLED;
         }
     }
     pub fn load(path: &Path) -> Result<Self, glib::Error> {
@@ -178,7 +179,7 @@ impl Config {
             ..Self::default()
         };
         for (i, key) in CHART_KEYS.iter().enumerate() {
-            config.enabled[i] = file.boolean("Graphs", key).unwrap_or(true);
+            config.enabled[i] = file.boolean("Graphs", key).unwrap_or(config.enabled[i]);
         }
         if let Ok(order) = file.string("Graphs", "order") {
             // Leave unused slots invalid so normalize() fills them at the end.
@@ -284,6 +285,23 @@ fn write_palettes(file: &KeyFile, prefix: &str, palettes: &Palettes) {
 mod tests {
     use super::*;
     #[test]
+    fn default_charts_leave_per_qube_cpu_and_ram_available_and_keep_saved_choices() {
+        let file = KeyFile::new();
+        let defaults = Config::decode(&file);
+        let disabled: Vec<_> = CHART_NAMES
+            .into_iter()
+            .zip(defaults.enabled)
+            .filter_map(|(name, enabled)| (!enabled).then_some(name))
+            .collect();
+        assert_eq!(disabled, ["Per-qube CPU", "Per-qube RAM"]);
+        file.set_boolean("Graphs", "qube_cpu", true);
+        file.set_boolean("Graphs", "ram", false);
+        let loaded = Config::decode(&file);
+        assert!(loaded.enabled[1]);
+        assert!(!loaded.enabled[2]);
+        assert_eq!(Config::decode(&loaded.encode()), loaded);
+    }
+    #[test]
     fn default_theme_is_light_gradient_but_saved_choices_are_kept() {
         let expected = Appearance::builtin(BuiltinTheme::LightGradient);
         assert_eq!(Config::default().appearance, expected);
@@ -330,7 +348,8 @@ mod tests {
         let config = Config::decode(&file);
         assert_eq!(config.width, 4);
         assert!(!config.enabled[0]);
-        assert!(config.enabled[1]);
+        assert!(!config.enabled[1]);
+        assert!(config.enabled[2]);
         assert!(!config.appearance.unsaved());
         assert_eq!(config.appearance.palettes[0].colors[2], 0xFDF6E300);
         assert_eq!(Config::decode(&config.encode()), config);
