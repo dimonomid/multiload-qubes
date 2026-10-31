@@ -199,7 +199,7 @@ mod tests {
                 .join(name);
             fs::create_dir_all(path.join("device")).unwrap();
             fs::create_dir(path.join("slaves")).unwrap();
-            fs::write(path.join("dev"), format!("8:{}", read)).unwrap();
+            fs::write(path.join("dev"), format!("8:{read}")).unwrap();
             fs::write(path.join("diskseq"), "1").unwrap();
             fs::write(
                 path.join("stat"),

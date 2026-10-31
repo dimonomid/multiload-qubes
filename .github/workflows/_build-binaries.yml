@@ -1,0 +1,60 @@
+name: binaries
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Git ref or commit to build
+        type: string
+        required: true
+      package_rpm:
+        description: Build and upload the RPM after checks pass
+        type: boolean
+        default: true
+      artifact_prefix:
+        description: Prefix for the uploaded artifact name
+        type: string
+        default: build-check
+      retention_days:
+        description: Days to keep the workflow artifact
+        type: number
+        default: 7
+      release_tag:
+        description: Expected release tag, empty for non-release builds
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  fedora37:
+    name: Fedora 37 (x86-64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Build Fedora 37 image
+        run: docker build --tag multiload-qubes-fedora37 .github/fedora37-builder
+
+      - name: Run checks and build
+        env:
+          PACKAGE_RPM: ${{ inputs.package_rpm }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          docker run --rm \
+            --env PACKAGE_RPM --env RELEASE_TAG \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            multiload-qubes-fedora37
+
+      - name: Upload RPM and checksums
+        if: inputs.package_rpm
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_prefix }}-artifacts
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}

@@ -1,0 +1,15 @@
+name: ci-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/_build-binaries.yml
+    with:
+      source_ref: ${{ github.sha }}
+      package_rpm: false

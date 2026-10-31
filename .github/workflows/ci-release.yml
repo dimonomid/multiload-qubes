@@ -1,0 +1,60 @@
+name: ci-release
+
+on:
+  push:
+    branches:
+      - master
+      - 'release-*'
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    outputs:
+      releases_created: ${{ steps.release-please.outputs.releases_created }}
+      tag_name: ${{ steps.release-please.outputs.tag_name }}
+    permissions:
+      issues: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Release please
+        id: release-please
+        uses: googleapis/release-please-action@v5
+        with:
+          target-branch: ${{ github.ref_name }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  binaries:
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    uses: ./.github/workflows/_build-binaries.yml
+    with:
+      source_ref: ${{ needs.release-please.outputs.tag_name }}
+      release_tag: ${{ needs.release-please.outputs.tag_name }}
+      artifact_prefix: release
+      retention_days: 1
+
+  publish:
+    name: Attach RPM to release
+    needs:
+      - release-please
+      - binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v7
+        with:
+          name: release-artifacts
+          path: release
+
+      - name: Upload RPM and checksums to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
