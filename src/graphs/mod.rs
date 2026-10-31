@@ -4,13 +4,13 @@
 //! interval, so columns can repeat a fresh snapshot. Missing data stays a gap;
 //! it must not look like measured zero usage.
 mod domain_graph;
+mod input;
 use crate::palette::source;
 use crate::palette::Palette;
 use domain_graph::Metric;
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::fs;
 
 use crate::Snapshot;
 
@@ -61,7 +61,7 @@ impl Graphs {
                 )),
             })
         } else {
-            fs::read_to_string("/run/multiload-qubes/metrics")
+            input::read(std::path::Path::new("/run/multiload-qubes/metrics"))
                 .ok()
                 .and_then(|s| Snapshot::decode_fresh(&s).ok())
         };
