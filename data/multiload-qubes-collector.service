@@ -1,14 +1,16 @@
 [Unit]
-Description=Read-only Xen statistics for Multiload for Qubes
+Description=Host statistics and guest transports for Multiload for Qubes
+Wants=multiload-qubes-parser.service
 After=qubes-qmemman.service xenstored.service
 ConditionPathExists=/dev/xen/privcmd
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/mkdir -p /run/multiload-qubes-host/raw
 ExecStart=/usr/libexec/multiload-qubes-collector
 Restart=always
 RestartSec=3
-RuntimeDirectory=multiload-qubes
+RuntimeDirectory=multiload-qubes-host
 RuntimeDirectoryMode=0755
 UMask=0022
 NoNewPrivileges=true

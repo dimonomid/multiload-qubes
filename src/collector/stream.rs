@@ -3,7 +3,9 @@
 //! Each reader owns a worker thread and a local qvm-run process group. The
 //! sampling loop only reads the latest value; it does not wait for guest I/O.
 use super::diagnostics::StderrCapture;
-use super::protocol::{shell_quote, Kind, Reading, Tracker, MEMORY_SCRIPT, NETWORK_SCRIPT};
+use crate::metrics::handoff::{RawFrame, MAX_REPORT_BYTES};
+use crate::metrics::protocol::{Kind, Reading, Tracker};
+use crate::metrics::publish_bytes;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{killpg, Signal};
@@ -11,6 +13,7 @@ use nix::unistd::Pid;
 use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -18,6 +21,34 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+pub const MEMORY_SCRIPT: &str = include_str!("../../guest/memory.py");
+pub const NETWORK_SCRIPT: &str = include_str!("../../guest/network.py");
+
+pub fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+#[derive(Clone)]
+pub struct RawTarget {
+    pub path: PathBuf,
+    pub identity: String,
+}
+impl RawTarget {
+    pub fn publish(&self, session: &str, payload: &[u8]) -> Result<(), String> {
+        if payload.len() > MAX_REPORT_BYTES {
+            return Err("oversized raw report".into());
+        }
+        let frame = RawFrame {
+            identity: self.identity.clone(),
+            session: session.into(),
+            timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
+            payload: payload.into(),
+        };
+        let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
+        publish_bytes(&self.path, &bytes)
+    }
+}
 
 #[derive(Clone)]
 pub struct CommandSpec {
@@ -150,6 +181,7 @@ impl Connection {
         changed
     }
 
+    #[cfg(test)]
     fn value(&self, now: Instant, stale: Duration) -> Option<Reading> {
         match self.state {
             ConnectionState::Reporting {
@@ -166,12 +198,31 @@ type SharedConnection = Arc<Mutex<Connection>>;
 /// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
     stop: Arc<AtomicBool>,
+    #[cfg(test)]
     connection: SharedConnection,
     thread: Option<JoinHandle<()>>,
+    #[cfg(test)]
     timing: Timing,
 }
 impl Reader {
+    #[cfg(test)]
     pub fn spawn(spec: CommandSpec, kind: Kind, timing: Timing) -> io::Result<Self> {
+        Self::spawn_inner(spec, kind, timing, None)
+    }
+    pub fn spawn_raw(
+        spec: CommandSpec,
+        kind: Kind,
+        timing: Timing,
+        target: RawTarget,
+    ) -> io::Result<Self> {
+        Self::spawn_inner(spec, kind, timing, Some(target))
+    }
+    fn spawn_inner(
+        spec: CommandSpec,
+        kind: Kind,
+        timing: Timing,
+        target: Option<RawTarget>,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let connection = Arc::new(Mutex::new(Connection::new()));
         let (worker_stop, worker_connection) = (stop.clone(), connection.clone());
@@ -183,7 +234,19 @@ impl Reader {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .state = ConnectionState::Waiting;
-                    let result = session(&spec, kind, timing, &worker_stop, &worker_connection);
+                    let result = session_inner(
+                        &spec,
+                        kind,
+                        timing,
+                        &worker_stop,
+                        &worker_connection,
+                        target.as_ref(),
+                    );
+                    if let Some(target) = &target {
+                        // An empty frame clears the parser's previous value on
+                        // disconnect instead of leaving it visible until timeout.
+                        let _ = target.publish("disconnected", &[]);
+                    }
                     if worker_stop.load(Ordering::Relaxed) {
                         break;
                     }
@@ -220,13 +283,16 @@ impl Reader {
             })?;
         Ok(Self {
             stop,
+            #[cfg(test)]
             connection,
             thread: Some(thread),
+            #[cfg(test)]
             timing,
         })
     }
     /// Returns no value while connecting, after a failure, or once a report is
     /// too old. A stopped reader never returns its last measurement.
+    #[cfg(test)]
     pub fn value(&self) -> Option<Reading> {
         if self.stop.load(Ordering::Relaxed) {
             return None;
@@ -252,12 +318,24 @@ impl Drop for Reader {
     }
 }
 
+#[cfg(test)]
 fn session(
     spec: &CommandSpec,
     kind: Kind,
     timing: Timing,
     stop: &AtomicBool,
     connection: &SharedConnection,
+) -> Result<(), String> {
+    session_inner(spec, kind, timing, stop, connection, None)
+}
+
+fn session_inner(
+    spec: &CommandSpec,
+    kind: Kind,
+    timing: Timing,
+    stop: &AtomicBool,
+    connection: &SharedConnection,
+    target: Option<&RawTarget>,
 ) -> Result<(), String> {
     let mut command = Command::new(&spec.program);
     command
@@ -267,6 +345,15 @@ fn session(
         .stderr(Stdio::piped())
         .process_group(0);
     let mut proc = Process(command.spawn().map_err(|e| e.to_string())?);
+    // A reconnect must not reuse the network counter baseline from the old process.
+    let session = format!(
+        "{}-{}",
+        proc.0.id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    );
     let mut stdout = proc.0.stdout.take().ok_or("missing stdout")?;
     set_nonblocking(&stdout).map_err(|e| e.to_string())?;
     let mut stderr = proc.0.stderr.take().ok_or("missing stderr")?;
@@ -304,15 +391,25 @@ fn session(
                         if budget < 0.0 {
                             return Err("guest exceeded sample rate limit".into());
                         }
-                        let reading = tracker.update(&buffer[..end])?;
+                        let reading = if let Some(target) = target {
+                            target.publish(&session, &buffer[..end])?;
+                            None
+                        } else {
+                            tracker.update(&buffer[..end])?
+                        };
                         buffer.drain(..=end);
-                        // A valid first network frame has no rate yet, but it
-                        // still proves the reporter is alive.
+                        // Transport liveness depends on receiving bounded frames;
+                        // only the restricted parser decides if metrics are valid.
                         last = now;
-                        let recovered = connection
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .report(reading, now);
+                        let recovered = {
+                            let mut connection =
+                                connection.lock().unwrap_or_else(|e| e.into_inner());
+                            if target.is_some() {
+                                connection.last_error.take().is_some()
+                            } else {
+                                connection.report(reading, now)
+                            }
+                        };
                         if recovered {
                             eprintln!("Guest metrics [{}] recovered", spec.source);
                         }
@@ -896,6 +993,7 @@ mod tests {
 
     #[test]
     fn qubes_command_never_autostarts() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
         let cmd = CommandSpec::qube("dev", Kind::Memory(23));
         assert_eq!(cmd.program, "qvm-run");
         assert!(cmd.args.iter().any(|s| s == "--no-autostart"));

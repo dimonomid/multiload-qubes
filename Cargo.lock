@@ -599,6 +599,8 @@ dependencies = [
  "libloading",
  "multiload-qubes-snapshot",
  "nix",
+ "serde",
+ "serde_json",
  "signal-hook",
  "strip-ansi-escapes",
 ]

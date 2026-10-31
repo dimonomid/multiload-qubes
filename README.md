@@ -56,42 +56,49 @@ the traffic speed.
 
 ## Architecture
 
-The project consists of two components:
+The project runs two systemd services and an XFCE panel plugin in dom0:
 
-- A systemd service collects data from Xen, dom0 and running qubes, and writes
-  it to `/run/multiload-qubes/metrics`.
-- An XFCE panel plugin reads that file and draws the charts.
+- The collector service reads Xen and dom0 statistics, and runs fixed Python
+  reporters in Linux qubes. It writes host statistics and raw guest reports
+  (without parsing their measurement fields) under `/run/multiload-qubes-host/`.
+- The parser service runs as the dedicated `multiload-qubes` user. It watches
+  those files with inotify, parses them, and writes combined metrics to
+  `/run/multiload-qubes/metrics`.
+- The XFCE panel plugin reads the combined metrics and draws the charts.
 
-Both components run in dom0.
-
-The service also sends small Python scripts to Linux qubes to collect RAM, swap
-and network data. Nothing needs to be installed in the qubes.
+Nothing needs to be installed in the qubes.
 
 ## Security
 
-The collector runs as root in dom0. It reads CPU and RAM allocation from Xen,
-memory and disk statistics from dom0, and RAM, swap and network reports from
-qubes. The panel plugin runs as the desktop user and only reads the metrics
-file. It does not connect to qubes.
+The collector service runs as root in dom0, has Xen and Qubes access, and is
+designed to do absolute minimum that a privileged service has to do: collects
+data from Xen, collects untrusted data from VMs without parsing their
+measurement fields (using python scripts bundled with the application), and
+stores both kinds of data on disk. These files and their directory are owned
+by root and are not writable by others; VMs cannot choose their paths or
+identities.
+
+The separate parser service runs as a very restricted user in dom0: it has no
+Linux capabilities, Xen devices, Qubes management sockets, network access, or
+access to your home or desktop session. Its writable files are limited to its
+runtime directory.  Systemd limits its memory, CPU and process count. It parses
+the raw input files created by the collector service, and writes the resulting
+combined output snapshot.
+
+Then finally, xfce panel plugin runs as your main desktop dom0 user, reads the
+combined snapshot that the parser previously wrote, and draws the charts.
 
 ```mermaid
 flowchart LR
-    subgraph Dom0[dom0]
-        Xen[Xen statistics and domain identities]
-        Host[dom0 memory and physical disk statistics]
-        Collector[Collector service - root]
-        Metrics["/run/multiload-qubes/metrics"]
-        Panel[XFCE panel plugin - desktop user]
-        Xen --> Collector
-        Host --> Collector
-        Collector -->|Starts scripts through qvm-run and qrexec| Reporters
-        Reporters -->|RAM, swap and network reports| Collector
-        Collector -->|Writes complete snapshots| Metrics
-        Metrics -->|Reads snapshots| Panel
-    end
-    subgraph Guests[Running qubes]
-        Reporters[Python RAM, swap and network reporters]
-    end
+    Host[Xen and dom0 statistics] --> Collector[Collector service - root]
+    Collector --> HostFile[Host snapshot]
+    Collector -->|Fixed scripts| Reporters[Guest reporters]
+    Reporters --> Collector
+    Collector --> Raw[Bounded raw reports]
+    HostFile --> Parser[Parser service - restricted account]
+    Raw -->|inotify| Parser
+    Parser --> Metrics[Combined metrics]
+    Metrics --> Panel[XFCE panel plugin - desktop user]
 ```
 
 By default, the collector tries to collect RAM and swap from all eligible
@@ -100,37 +107,31 @@ qubes. Collection continues even if you remove the panel plugin; stop the
 systemd service `multiload-qubes-collector` to stop collection. The collector
 has two options to disable qubes communication:
 
-- `no-guest-memory`: if present, no RAM and swap info will be collected from
+- `--no-guest-memory`: if present, no RAM and swap info will be collected from
   qubes
-- `no-network`: if present, no network info will be collected from `sys-net
+- `--no-network`: if present, no network info will be collected from `sys-net`
 
 So when both of these flags are provided, it disables all qubes communication,
-and only xen data is used for the charts.
+and only host data is used for the charts.
 
-Reports from qubes are treated as untrusted input. The collector checks their
-format and numbers, limits report size and frequency, and drops connections
-that stop reporting. Guest error messages are shortened and cleaned before
-being logged. Each connection has its own worker, so a slow qube does not
-hold up the other measurements. The metrics file is owned by root and replaced
-in one step, so the panel reads a complete snapshot. Missing or old reports
-are shown as unavailable.
+Reports from qubes are treated as untrusted input. The parser checks their
+format, numbers, freshness and domain identity. It resets network counters on
+reconnection. Files are replaced in one step, so readers see complete snapshots.
+Missing or old reports are shown as unavailable.
 
-These checks do not prove that a report is true. A compromised qube can lie
-about its RAM or swap usage, and a compromised `sys-net` can lie about network
-traffic.
+A compromised qube can lie about its RAM or swap usage, and a compromised
+`sys-net` can lie about network traffic.
 
-The same root process currently reads Xen statistics and parses guest reports.
-The systemd service restricts filesystem writes and access to home directories,
-but it still has privileged Xen and Qubes access. Its operations are intended
-to only read statistics; those privileges do not enforce that limit. A bug in
-guest report handling could therefore affect dom0. Separating that code into
-a process with fewer privileges would improve this design, but is not
-implemented yet.
-
-Installing this package means trusting its code and the machine that built
-it, since it runs in dom0. CI signs pre-built RPMs and checksums with Sigstore,
+Installing this package means trusting its code and the machine that built it,
+since it runs in dom0. CI signs pre-built RPMs and checksums with Sigstore,
 using its GitHub workflow identity. This lets you check where the package came
 from; it does not prove that the code is safe.
+
+I did my best to keep dom0 safe when handling data from potentially compromised
+qubes, but bugs can happen. The collector/parser split keeps guest measurement
+parsing out of the privileged process. This reduces the possible impact of
+parsing bugs, but does not 100% eliminate the risks of processing
+guest-controlled data in dom0.
 
 ## Installation
 
@@ -159,6 +160,13 @@ sudo systemctl enable --now multiload-qubes-collector.service
 xfce4-panel -r
 ```
 
+Starting the collector also starts `multiload-qubes-parser.service` automatically.
+To check both services:
+
+```bash
+systemctl status multiload-qubes-collector.service multiload-qubes-parser.service
+```
+
 Then right-click on the xfce4 panel -> Panel -> Panel Preferences -> Items ->
 Add, and select **Multiload for Qubes**.
 
@@ -176,7 +184,8 @@ make test
 ```
 
 The plugin is built as `build/libmultiload-qubes.so`, and the collector as
-`target/release/multiload-qubes-collector`.
+`target/release/multiload-qubes-collector`. The parser is built as
+`target/release/multiload-qubes-parser`.
 
 ### RPM for dom0
 

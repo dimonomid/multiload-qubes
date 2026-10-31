@@ -76,7 +76,7 @@ mod tests {
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "collector::shutdown::tests::signal_child",
+                    "metrics::shutdown::tests::signal_child",
                     "--ignored",
                 ])
                 .env("MQ_SIGNAL_READY", &path)

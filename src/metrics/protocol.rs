@@ -4,9 +4,6 @@
 //! in bytes. Network rates use the guest's monotonic clock, not arrival times.
 use std::collections::BTreeMap;
 
-pub const MEMORY_SCRIPT: &str = include_str!("../../guest/memory.py");
-pub const NETWORK_SCRIPT: &str = include_str!("../../guest/network.py");
-
 pub fn number(value: &str) -> Result<u64, String> {
     if value.is_empty() || value.len() > 20 || !value.bytes().all(|c| c.is_ascii_digit()) {
         return Err("invalid unsigned integer".into());
@@ -198,10 +195,6 @@ impl Tracker {
     }
 }
 
-pub fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +337,5 @@ mod tests {
         ] {
             assert!(!qube_name(name));
         }
-        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 }

@@ -1,45 +1,27 @@
-//! Runs in dom0 and combines Xen counters with reports from running guests.
+//! Privileged host sampling and guest transport.
 //!
-//! Guest readers run on separate threads so a slow or stopped qube does not
-//! block sampling. The panel reads a snapshot file; it never talks to guests.
+//! Transport workers publish bounded raw reports without interpreting measurements.
+//! The systemd parser service combines them under a dedicated, restricted account.
 mod diagnostics;
 mod disk;
-pub mod protocol;
-mod shutdown;
 pub mod stream;
 pub mod xen;
 
-use multiload_qubes_snapshot::{
-    unix_time_now, DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot, Snapshot,
+use crate::metrics::{
+    eligible, handoff, protocol, publish, ram_snapshot, shutdown, snapshot, swap_snapshot, Domain,
+    Host, Identity,
 };
-use protocol::{Kind, Reading};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
+use protocol::Kind;
+#[cfg(test)]
+use protocol::Reading;
+use std::collections::BTreeMap;
+use std::fs;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use stream::{CommandSpec, Reader, Timing};
-
-#[derive(Clone, Debug)]
-pub struct Domain {
-    pub id: u32,
-    pub identity: String,
-    pub name: String,
-    pub cpu_ns: u64,
-    pub vcpus: Option<u32>,
-    pub allocated: u64,
-    pub paused: bool,
-    pub shutdown: bool,
-    pub stubdom: Option<u32>,
-}
-#[derive(Clone)]
-pub struct Host {
-    pub total: u64,
-    pub free: u64,
-    pub cpus: u32,
-    pub domains: Vec<Domain>,
-}
 
 /// Tracks counter differences, not CPU load averages.
 /// Host usage uses the host CPU count; per-qube usage uses that qube's vCPUs.
@@ -127,168 +109,94 @@ impl CpuTracker {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Identity {
-    id: u32,
-    uuid: String,
-    name: String,
-}
-fn eligible(host: &Host) -> BTreeMap<u32, Identity> {
-    // Stub domains run device models, not a normal guest reporter. Their RAM
-    // still counts toward host allocation, but its used amount stays unknown.
-    let stubs: BTreeSet<_> = host.domains.iter().filter_map(|d| d.stubdom).collect();
-    host.domains
-        .iter()
-        .filter(|d| {
-            d.id != 0
-                && !d.paused
-                && !d.shutdown
-                && !stubs.contains(&d.id)
-                && !d.identity.is_empty()
-                && protocol::qube_name(&d.name)
-        })
-        .map(|d| {
-            (
-                d.id,
-                Identity {
-                    id: d.id,
-                    uuid: d.identity.clone(),
-                    name: d.name.clone(),
-                },
-            )
-        })
-        .collect()
-}
-
-/// Keeps reporters for running qubes and retires them when those qubes change.
-/// The same report supplies guest RAM and swap; they need no separate connections.
-pub struct MemoryPool {
-    readers: BTreeMap<u32, (Identity, Reader)>,
-    // Stopping a reader can take time. Keep it here so joining its thread
-    // does not hold up the main sampling loop.
+/// Owns only transports; measurement fields are parsed by the other service.
+struct Reporters {
+    readers: BTreeMap<String, (Identity, Reader)>,
     retired: Vec<Reader>,
+    directory: std::path::PathBuf,
+    factory: fn(&Identity, Kind) -> CommandSpec,
     limit: usize,
-    factory: fn(&Domain) -> std::io::Result<Reader>,
 }
-impl MemoryPool {
-    pub fn new() -> Self {
+impl Reporters {
+    fn new(directory: std::path::PathBuf) -> Self {
         Self {
             readers: BTreeMap::new(),
             retired: Vec::new(),
-            limit: 128,
-            factory: |d| {
-                Reader::spawn(
-                    CommandSpec::qube(&d.name, Kind::Memory(d.id)),
-                    Kind::Memory(d.id),
-                    Timing::default(),
-                )
-            },
+            directory,
+            factory: |identity, kind| CommandSpec::qube(&identity.name, kind),
+            limit: 129,
         }
     }
-    pub fn sync(&mut self, host: &Host) {
-        let active = eligible(host);
+    fn sync(&mut self, host: &Host, memory: bool, network: Option<&str>) {
+        let mut wanted = BTreeMap::new();
+        let mut memory_count = 0;
+        for identity in eligible(host).into_values() {
+            if memory && memory_count < 128 {
+                memory_count += 1;
+                wanted.insert(
+                    format!("memory-{}", identity.id),
+                    (identity.clone(), Kind::Memory(identity.id)),
+                );
+            }
+            if network == Some(identity.name.as_str()) {
+                wanted.insert("network".into(), (identity, Kind::Network));
+            }
+        }
         let remove: Vec<_> = self
             .readers
             .iter()
-            .filter(|(id, (key, _))| active.get(id) != Some(key))
-            .map(|(id, _)| *id)
+            .filter(|(file, (key, _))| wanted.get(*file).is_none_or(|(new, _)| new != key))
+            .map(|(file, _)| file.clone())
             .collect();
-        for id in remove {
-            if let Some((_, reader)) = self.readers.remove(&id) {
+        for file in remove {
+            if let Some((_, reader)) = self.readers.remove(&file) {
                 reader.stop();
                 self.retired.push(reader);
             }
         }
         self.retired.retain(|r| !r.finished());
-        for domain in &host.domains {
-            // Count workers still shutting down too, so rapid VM restarts
-            // cannot keep creating more threads and connections.
+        // Remove abandoned files so domain-ID churn cannot grow /run forever.
+        if let Ok(files) = fs::read_dir(&self.directory) {
+            for file in files.flatten() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                let report_file = name == "network"
+                    || name
+                        .strip_prefix("memory-")
+                        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+                // A worker may be publishing a temporary file right now.
+                if report_file && !wanted.contains_key(&name) {
+                    let _ = fs::remove_file(file.path());
+                }
+            }
+        }
+        for (file, (identity, kind)) in wanted {
+            if self.readers.contains_key(&file) {
+                continue;
+            }
+            // Count workers still shutting down so rapid restarts stay bounded.
             if self.readers.len() + self.retired.len() >= self.limit {
                 break;
             }
-            let Some(key) = active.get(&domain.id) else {
-                continue;
+            let target = stream::RawTarget {
+                path: self.directory.join(&file),
+                identity: format!("{}/{}", identity.id, identity.uuid),
             };
-            if let std::collections::btree_map::Entry::Vacant(entry) = self.readers.entry(domain.id)
-            {
-                match (self.factory)(domain) {
-                    Ok(reader) => {
-                        entry.insert((key.clone(), reader));
-                    }
-                    Err(error) => eprintln!("Cannot create memory reader: {error}"),
+            match Reader::spawn_raw(
+                (self.factory)(&identity, kind),
+                kind,
+                Timing::default(),
+                target,
+            ) {
+                Ok(reader) => {
+                    self.readers.insert(file, (identity, reader));
                 }
+                Err(error) => eprintln!("Cannot start guest reporter: {error}"),
             }
         }
     }
-    pub fn readings(&self, host: &Host) -> BTreeMap<u32, u64> {
-        host.domains
-            .iter()
-            .filter_map(|d| {
-                let (identity, reader) = self.readers.get(&d.id)?;
-                if identity.uuid != d.identity || identity.name != d.name {
-                    return None;
-                }
-                match reader.value() {
-                    Some(Reading::Memory { used, .. }) => Some((d.id, used)),
-                    _ => None,
-                }
-            })
-            .collect()
-    }
 }
-/// Missing reports stay absent; incarnation checks prevent old samples being reused.
-fn domain_snapshot(
-    host: &Host,
-    dom0: (u64, u64),
-    pool: Option<&MemoryPool>,
-    value: fn(Reading) -> Option<(u64, u64)>,
-) -> DomainUsageSnapshot {
-    let active = eligible(host);
-    let mut entries = vec![DomainUsage {
-        id: "dom0".into(),
-        name: "dom0".into(),
-        total: dom0.0,
-        used: dom0.1,
-    }];
-    if let Some(pool) = pool {
-        for (id, key) in &active {
-            let Some((identity, reader)) = pool.readers.get(id) else {
-                continue;
-            };
-            if identity != key {
-                continue;
-            }
-            if let Some((total, used)) = reader.value().and_then(value) {
-                entries.push(DomainUsage {
-                    id: format!("{}/{}", id, key.uuid),
-                    name: key.name.clone(),
-                    total,
-                    used,
-                });
-            }
-        }
-    }
-    DomainUsageSnapshot {
-        expected: active.len() as u32 + 1,
-        entries,
-    }
-}
-fn swap_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> DomainUsageSnapshot {
-    domain_snapshot(host, dom0, pool, |r| match r {
-        Reading::Memory { swap, .. } => swap,
-        _ => None,
-    })
-}
-fn ram_snapshot(host: &Host, dom0: (u64, u64), pool: Option<&MemoryPool>) -> DomainUsageSnapshot {
-    domain_snapshot(host, dom0, pool, |r| match r {
-        Reading::Memory { total, used, .. } => Some((total, used)),
-        _ => None,
-    })
-}
-
-impl Drop for MemoryPool {
+impl Drop for Reporters {
     fn drop(&mut self) {
-        // Stop every worker first, then their Drop implementations join concurrently exiting threads.
         for (_, reader) in self.readers.values() {
             reader.stop();
         }
@@ -296,90 +204,6 @@ impl Drop for MemoryPool {
             reader.stop();
         }
     }
-}
-
-pub fn snapshot(
-    host: &Host,
-    dom0: u64,
-    readings: &BTreeMap<u32, u64>,
-    cpu: Option<f64>,
-    network: Option<Reading>,
-    period: f64,
-) -> Result<Snapshot, String> {
-    let (mut allocated, mut used, mut unknown) = (0_u64, 0_u64, 0_u64);
-    for d in &host.domains {
-        allocated = allocated
-            .checked_add(d.allocated)
-            .ok_or("allocation overflow")?;
-        let usage = if d.id == 0 {
-            Some(dom0)
-        } else {
-            readings.get(&d.id).copied()
-        };
-        // Guest reports and Xen allocation are sampled separately. Ballooning
-        // can make a report larger than the current allocation.
-        if let Some(n) = usage {
-            used = used
-                .checked_add(n.min(d.allocated))
-                .ok_or("usage overflow")?;
-        } else {
-            unknown = unknown
-                .checked_add(d.allocated)
-                .ok_or("unknown allocation overflow")?;
-        }
-    }
-    let snapshot = Snapshot {
-        timestamp: unix_time_now().map_err(|e| e.to_string())?,
-        cpu,
-        total: host.total,
-        allocated,
-        used,
-        unknown,
-        overhead: host
-            .total
-            .saturating_sub(allocated)
-            .saturating_sub(host.free),
-        period,
-        swap: None,
-        qube_ram: None,
-        qube_cpu: None,
-        disk: None,
-        network: match network {
-            Some(Reading::Network(rx, tx)) => Some((rx, tx)),
-            _ => None,
-        },
-    };
-    snapshot.validate().map_err(|e| e.to_string())?;
-    Ok(snapshot)
-}
-
-pub fn publish(path: &Path, text: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let tmp = parent.join(format!(".metrics-{}-{stamp}", std::process::id()));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.set_permissions(fs::Permissions::from_mode(0o644))?;
-        drop(file);
-        // The panel must see either the previous complete snapshot or this one.
-        // Keeping the temporary file beside the destination allows an atomic rename.
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result.map_err(|e| e.to_string())
 }
 
 pub struct Options {
@@ -406,8 +230,12 @@ pub fn run(options: Options) -> Result<(), String> {
             None,
             options.interval,
         )?;
-        data.swap = Some(swap_snapshot(&host, protocol::dom0_swap(&meminfo)?, None));
-        data.qube_ram = Some(ram_snapshot(&host, usage, None));
+        data.swap = Some(swap_snapshot(
+            &host,
+            protocol::dom0_swap(&meminfo)?,
+            &BTreeMap::new(),
+        ));
+        data.qube_ram = Some(ram_snapshot(&host, usage, &BTreeMap::new()));
         data.disk = disk.sample(start.elapsed());
         print!("{}", data.encode().map_err(|e| e.to_string())?);
         return Ok(());
@@ -420,48 +248,46 @@ pub fn run(options: Options) -> Result<(), String> {
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let shutdown = shutdown::Shutdown::register()
         .map_err(|e| format!("Cannot install signal handlers: {e}"))?;
-    let network = options
-        .network
-        .map(|name| {
-            Reader::spawn(
-                CommandSpec::qube(&name, Kind::Network),
-                Kind::Network,
-                Timing::default(),
-            )
-        })
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    let mut memory = options.memory.then(MemoryPool::new);
+    let raw_directory = parent.join("raw");
+    fs::create_dir_all(&raw_directory).map_err(|e| e.to_string())?;
+    let mut reporters = Reporters::new(raw_directory);
     while !shutdown.requested() {
         let tick = Instant::now();
         let result = (|| {
             let host = xen.sample()?;
             let cpu_usage = cpu.update(&host, start.elapsed());
-            let readings = if let Some(pool) = &mut memory {
-                pool.sync(&host);
-                pool.readings(&host)
-            } else {
-                BTreeMap::new()
-            };
+            reporters.sync(&host, options.memory, options.network.as_deref());
+            let readings = BTreeMap::new();
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
             let dom0 = protocol::dom0_memory(&meminfo)?;
-            let mut data = snapshot(
-                &host,
-                dom0.1,
-                &readings,
-                cpu_usage,
-                network.as_ref().and_then(Reader::value),
-                options.interval,
-            )?;
+            let mut data = snapshot(&host, dom0.1, &readings, cpu_usage, None, options.interval)?;
             data.swap = Some(swap_snapshot(
                 &host,
                 protocol::dom0_swap(&meminfo)?,
-                memory.as_ref(),
+                &BTreeMap::new(),
             ));
             data.qube_cpu = cpu.per_domain.clone();
-            data.qube_ram = Some(ram_snapshot(&host, dom0, memory.as_ref()));
+            data.qube_ram = Some(ram_snapshot(&host, dom0, &BTreeMap::new()));
             data.disk = disk.sample(start.elapsed());
-            publish(&options.output, &data.encode().map_err(|e| e.to_string())?)
+            let metrics = data.encode().map_err(|e| e.to_string())?;
+            let frame = handoff::HostFrame {
+                host: host.clone(),
+                metrics,
+                memory_enabled: options.memory,
+                network_identity: eligible(&host)
+                    .values()
+                    .find(|key| options.network.as_deref() == Some(key.name.as_str()))
+                    .map(|key| format!("{}/{}", key.id, key.uuid)),
+                dom0_ram: dom0,
+                dom0_swap: protocol::dom0_swap(&meminfo)?,
+            };
+            // Publish context first. Raw reports from a previous incarnation are
+            // rejected by identity even if an old file remains in the directory.
+            publish(
+                &parent.join("host.json"),
+                &serde_json::to_string(&frame).map_err(|e| e.to_string())?,
+            )?;
+            publish(&options.output, &frame.metrics)
         })();
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
@@ -470,11 +296,7 @@ pub fn run(options: Options) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    if let Some(reader) = &network {
-        reader.stop();
-    }
-    drop(memory);
-    drop(network);
+    drop(reporters);
     Ok(())
 }
 
@@ -629,102 +451,77 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
     #[test]
-    fn swap_coverage_ignores_missing_paused_and_reincarnated_readers() {
-        let mut host = host();
-        let mut pool = MemoryPool::new();
-        pool.factory = |d| {
-            Reader::spawn(
-                CommandSpec {
-                    source: "test swap".into(),
-                    program: "python3".into(),
-                    args: vec![
-                        "-u".into(),
-                        "-c".into(),
-                        format!(
-                "import time; print('M2 {} 1000 400 500 125',flush=True); time.sleep(30)", d.id),
-                    ],
-                },
-                Kind::Memory(d.id),
-                Timing::default(),
-            )
-        };
-        pool.sync(&host);
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while pool.readings(&host).len() < 2 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let data = swap_snapshot(&host, (100, 50), Some(&pool));
-        assert_eq!(data.expected, 3);
-        assert_eq!(data.entries.len(), 3);
-        assert_eq!(data.entries[0].name, "dom0");
-        assert_eq!(data.entries[1].used, 375);
-        assert_eq!(data.peak(), Some(75.0));
-        assert_eq!(pool.readings(&host)[&1], 600); // Swap is never added to RAM.
-        let ram = ram_snapshot(&host, (2000, 400), Some(&pool));
-        assert_eq!(ram.expected, 3);
-        assert_eq!(ram.entries[0].total, 2000);
-        assert_eq!(ram.entries[1].total, 1000);
+    fn guest_aggregation_keeps_dom0_and_missing_coverage() {
+        let host = host();
+        let readings = BTreeMap::from([(
+            1,
+            Reading::Memory {
+                total: 1000,
+                used: 600,
+                swap: Some((500, 375)),
+            },
+        )]);
+        let swap = swap_snapshot(&host, (100, 50), &readings);
+        assert_eq!(swap.expected, 3);
+        assert_eq!(swap.entries.len(), 2);
+        assert_eq!(swap.peak(), Some(75.0));
+        let ram = ram_snapshot(&host, (2000, 400), &readings);
         assert_eq!(ram.entries[1].used, 600);
         assert_eq!(ram.peak(), Some(60.0));
-        host.domains[1].identity = "new-identity".into();
-        assert_eq!(swap_snapshot(&host, (0, 0), Some(&pool)).entries.len(), 2);
-        host.domains[2].paused = true;
-        let data = swap_snapshot(&host, (0, 0), Some(&pool));
-        assert_eq!(data.expected, 2);
-        assert_eq!(data.entries.len(), 1);
-        assert_eq!(data.peak(), None);
-        let ram = ram_snapshot(&host, (2000, 400), Some(&pool));
-        assert_eq!(ram.expected, 2);
-        assert_eq!(ram.entries.len(), 1);
-        assert_eq!(swap_snapshot(&host, (0, 0), None).entries.len(), 1);
     }
-
     #[test]
-    fn pool_reuses_retires_and_bounds_connections() {
-        let mut pool = MemoryPool::new();
+    fn raw_reporters_pass_unparsed_bytes_reuse_connections_and_bound_retired_workers() {
+        let directory = std::env::temp_dir().join(format!("mq-raw-pool-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let mut pool = Reporters::new(directory.clone());
         pool.limit = 1;
-        pool.factory = |d| {
-            Reader::spawn(
-                CommandSpec {
-                    source: "test RAM".into(),
-                    program: "python3".into(),
-                    args: vec![
-                        "-u".into(),
-                        "-c".into(),
-                        format!(
-                            "import time; print('M1 {} 1000 400',flush=True); time.sleep(20)",
-                            d.id
-                        ),
-                    ],
-                },
-                Kind::Memory(d.id),
-                Timing::default(),
-            )
+        pool.factory = |_, _| {
+            CommandSpec { source: "raw transport test".into(), program: "python3".into(), args: vec!["-u".into(),"-c".into(),"import sys,time; sys.stdout.buffer.write(b'not a metric: \\xff\\n'); sys.stdout.flush(); time.sleep(20)".into()] }
         };
         let mut h = host();
-        pool.sync(&h);
+        pool.sync(&h, true, None);
         assert_eq!(pool.readers.len(), 1);
         let deadline = Instant::now() + Duration::from_secs(3);
-        while pool.readings(&h).get(&1) != Some(&600) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(pool.readings(&h).get(&1), Some(&600));
-        let key = pool.readers[&1].0.clone();
-        pool.sync(&h);
-        assert_eq!(pool.readers[&1].0, key);
-        h.domains[1].identity = "new".into();
-        assert!(pool.readings(&h).is_empty());
-        h.domains[1].paused = true;
-        pool.sync(&h);
-        assert!(!pool.readers.contains_key(&1));
+        let frame = loop {
+            if let Ok(bytes) = fs::read(directory.join("memory-1")) {
+                break serde_json::from_slice::<handoff::RawFrame>(&bytes).unwrap();
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(frame.payload, b"not a metric: \xff");
+        assert_eq!(frame.identity, "1/uuid-1");
+        pool.sync(&h, true, None);
+        let same: handoff::RawFrame =
+            serde_json::from_slice(&fs::read(directory.join("memory-1")).unwrap()).unwrap();
+        assert_eq!(same.session, frame.session);
+        fs::write(directory.join(".metrics-in-progress"), b"temporary").unwrap();
+        h.domains[1].identity = "replacement".into();
+        pool.sync(&h, true, None);
+        assert!(directory.join(".metrics-in-progress").exists());
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !pool.readers.contains_key(&2) && Instant::now() < deadline {
-            pool.sync(&h);
-            std::thread::sleep(Duration::from_millis(10));
+        while pool
+            .readers
+            .get("memory-1")
+            .is_none_or(|(key, _)| key.uuid != "replacement")
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            pool.sync(&h, true, None);
         }
-        assert!(pool.readers.contains_key(&2));
+        h.domains[1].paused = true;
+        pool.sync(&h, true, None);
+        assert!(pool.readers.len() + pool.retired.len() <= 1);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !pool.readers.contains_key("memory-2") {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            pool.sync(&h, true, None);
+        }
         h.domains.clear();
-        pool.sync(&h);
+        pool.sync(&h, true, None);
         assert!(pool.readers.is_empty());
+        drop(pool);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

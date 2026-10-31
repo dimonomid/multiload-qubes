@@ -1,6 +1,7 @@
 PREFIX ?= /usr
 LIBDIR ?= $(PREFIX)/lib64
 LIBEXECDIR ?= $(PREFIX)/libexec
+SYSUSERSDIR ?= $(PREFIX)/lib/sysusers.d
 UNITDIR ?= $(PREFIX)/lib/systemd/system
 CC ?= cc
 CARGO ?= cargo
@@ -12,14 +13,15 @@ LDLIBS += $(shell pkg-config --libs $(PKGS)) -ldl -lpthread -lm
 # replace the library in target/ with one built without the panel feature.
 RUSTLIB = build/libmultiload_qubes.a
 COLLECTOR = target/release/multiload-qubes-collector
+PARSER = target/release/multiload-qubes-parser
 PREVIEW = target/release/multiload-qubes-preview
 PANEL_HEADER = build/panel-api.h
 
 .PHONY: all test check gui-test install rpm clean
-all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR)
+all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR) $(PARSER)
 
-$(RUSTLIB) $(COLLECTOR) $(PREVIEW) $(PANEL_HEADER) &: build.rs cbindgen.toml Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
-	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector
+$(RUSTLIB) $(COLLECTOR) $(PARSER) $(PREVIEW) $(PANEL_HEADER) &: build.rs cbindgen.toml Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/metrics/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
+	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector --bin multiload-qubes-parser
 	$(CARGO) build --release --offline --features panel --lib --bin multiload-qubes-preview
 	cp target/release/libmultiload_qubes.a $(RUSTLIB)
 
@@ -49,8 +51,11 @@ check: all test
 install: all
 	install -Dm755 build/libmultiload-qubes.so $(DESTDIR)$(LIBDIR)/xfce4/panel/plugins/libmultiload-qubes.so
 	install -Dm644 data/multiload-qubes.desktop $(DESTDIR)$(PREFIX)/share/xfce4/panel/plugins/multiload-qubes.desktop
+	install -Dm755 $(PARSER) $(DESTDIR)$(LIBEXECDIR)/multiload-qubes-parser
 	install -Dm755 $(COLLECTOR) $(DESTDIR)$(LIBEXECDIR)/multiload-qubes-collector
 	install -Dm644 data/multiload-qubes-collector.service $(DESTDIR)$(UNITDIR)/multiload-qubes-collector.service
+	install -Dm644 data/multiload-qubes-parser.service $(DESTDIR)$(UNITDIR)/multiload-qubes-parser.service
+	install -Dm644 data/multiload-qubes.sysusers $(DESTDIR)$(SYSUSERSDIR)/multiload-qubes.conf
 
 rpm: all test
 	mkdir -p build/rpm/SOURCES

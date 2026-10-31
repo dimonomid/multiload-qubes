@@ -1,0 +1,50 @@
+[Unit]
+Description=Guest report parser for Multiload for Qubes
+Requires=multiload-qubes-collector.service
+After=multiload-qubes-collector.service
+PartOf=multiload-qubes-collector.service
+
+[Service]
+Type=simple
+User=multiload-qubes
+Group=multiload-qubes
+ExecStart=/usr/libexec/multiload-qubes-parser
+Restart=always
+RestartSec=3
+RuntimeDirectory=multiload-qubes
+RuntimeDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/tmp /var/tmp /dev/shm
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallFilter=~socket socketpair
+SystemCallErrorNumber=EPERM
+# These local sockets bypass VM-to-VM qrexec policy. Do not grant access
+# to them, or membership in the qubes group, to the parser account.
+InaccessiblePaths=-/run/qubes -/run/qubesd.sock -/run/qubesd.internal.sock -/run/qubesd.misc.sock -/run/xenstored -/run/xenstored-ro -/run/user -/var/lib/qubes -/etc/qubes -/etc/qubes-rpc
+MemoryMax=128M
+TasksMax=8
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target

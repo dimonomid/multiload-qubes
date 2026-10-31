@@ -1,5 +1,6 @@
 //! Metrics types and optional Rust GTK3 panel implementation.
 pub use multiload_qubes_snapshot::Snapshot;
+pub mod metrics;
 
 #[cfg(feature = "panel")]
 mod graphs;

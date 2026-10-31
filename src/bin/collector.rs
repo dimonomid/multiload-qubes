@@ -1,5 +1,6 @@
 #[path = "../collector/mod.rs"]
 mod collector;
+use multiload_qubes::metrics;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -16,8 +17,8 @@ struct Cli {
     #[arg(long, default_value_t = 0.5, value_parser = parse_interval)]
     interval: f64,
 
-    /// Path of the atomic snapshot read by the panel.
-    #[arg(long, default_value = "/run/multiload-qubes/metrics")]
+    /// Path of the host snapshot.
+    #[arg(long, default_value = "/run/multiload-qubes-host/metrics")]
     output: PathBuf,
 
     /// Qube owning the physical network interfaces.
@@ -42,7 +43,7 @@ fn parse_interval(value: &str) -> Result<f64, String> {
 }
 
 fn parse_qube(value: &str) -> Result<String, String> {
-    if !collector::protocol::qube_name(value) {
+    if !metrics::protocol::qube_name(value) {
         return Err("expected a valid Qubes name (1–31 ASCII letters, digits, '-' or '_', starting with a letter)".into());
     }
     Ok(value.into())
@@ -84,7 +85,7 @@ mod tests {
         assert_eq!(options.interval, 0.5);
         assert_eq!(
             options.output,
-            PathBuf::from("/run/multiload-qubes/metrics")
+            PathBuf::from("/run/multiload-qubes-host/metrics")
         );
         assert_eq!(options.network.as_deref(), Some("sys-net"));
         let options = parse(&[
