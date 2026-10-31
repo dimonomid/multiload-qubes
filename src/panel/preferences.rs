@@ -389,7 +389,7 @@ impl Preferences {
             let weak = Rc::downgrade(self);
             reset.connect_clicked(move |_| {
                 if let Some(p) = weak.upgrade() {
-                    p.select(&Selection::Builtin(BuiltinTheme::Original).id());
+                    p.select(&Selection::Builtin(BuiltinTheme::default()).id());
                 }
             });
         }

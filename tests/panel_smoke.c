@@ -93,6 +93,9 @@ static void failed_apply(GtkWidget *dialog, const char *path, const char *backup
     g_assert_cmpint(g_rename(backup, path), ==, 0);
 }
 static void apply_save_failure_test(XfcePanelPlugin *plugin, const char *path) {
+    GKeyFile *file = g_key_file_new();
+    g_assert_true(g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL));
+    int saved_theme = g_key_file_get_integer(file, "Appearance", "theme", NULL);
     char *backup = g_strconcat(path, ".before-failed-save", NULL);
     GtkWidget *dialog = preferences_dialog();
     g_assert_nonnull(dialog);
@@ -109,10 +112,9 @@ static void apply_save_failure_test(XfcePanelPlugin *plugin, const char *path) {
     g_assert_cmpint(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(width)), ==, 64);
     /* Autosave still sees committed settings, not the failed candidate. */
     g_signal_emit_by_name(plugin, "save");
-    GKeyFile *file = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, NULL));
     g_assert_cmpint(g_key_file_get_integer(file, "Graphs", "width", NULL), ==, 0);
-    g_assert_cmpint(g_key_file_get_integer(file, "Appearance", "theme", NULL), ==, 0);
+    g_assert_cmpint(g_key_file_get_integer(file, "Appearance", "theme", NULL), ==, saved_theme);
     /* Fixing the filesystem permits Apply again, with all edits preserved. */
     gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
     g_assert_false(gtk_widget_get_visible(dialog));
@@ -199,7 +201,12 @@ int main(int argc, char **argv) {
     g_assert_nonnull(path);
     GKeyFile *settings = g_key_file_new();
     g_assert_true(g_key_file_load_from_file(settings, path, G_KEY_FILE_NONE, NULL));
-    g_assert_cmpint(g_key_file_get_integer(settings, "Appearance", "theme", NULL), ==, 0);
+    GtkWidget *selector = gtk_grid_get_child_at(GTK_GRID(preferences_page(preferences_dialog(), 1)), 1, 0);
+    g_assert_true(GTK_IS_COMBO_BOX_TEXT(selector));
+    g_autofree char *theme_name = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(selector));
+    g_assert_cmpstr(theme_name, ==, "Light Gradient");
+    g_assert_cmpint(g_key_file_get_integer(settings, "Appearance", "theme", NULL), ==,
+                   g_ascii_strtoll(gtk_combo_box_get_active_id(GTK_COMBO_BOX(selector)), NULL, 10));
     g_key_file_unref(settings);
     apply_save_failure_test(plugin, path);
     g_free(path);

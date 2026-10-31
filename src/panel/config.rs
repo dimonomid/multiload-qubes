@@ -75,7 +75,7 @@ pub struct Appearance {
 }
 impl Default for Appearance {
     fn default() -> Self {
-        Self::builtin(BuiltinTheme::Original)
+        Self::builtin(BuiltinTheme::default())
     }
 }
 impl Appearance {
@@ -202,14 +202,15 @@ impl Config {
             .filter(|id| glib::uuid_string_is_valid(id));
         config.appearance.selection = match file
             .integer("Appearance", "theme")
-            .unwrap_or(BuiltinTheme::Original as i32)
+            .unwrap_or(BuiltinTheme::default() as i32)
         {
             SAVED_THEME_ID if source.is_some() => Selection::Saved(source.unwrap()),
             SAVED_THEME_ID | DRAFT_THEME_ID => Selection::Draft { source },
-            id => Selection::Builtin(
-                BuiltinTheme::from_id(id as u32).unwrap_or(BuiltinTheme::Original),
-            ),
+            id => Selection::Builtin(BuiltinTheme::from_id(id as u32).unwrap_or_default()),
         };
+        if let Selection::Builtin(theme) = config.appearance.selection {
+            config.appearance = Appearance::builtin(theme);
+        }
         config.appearance.palettes = read_palettes(file, "Appearance", config.appearance.palettes);
         // Saving panel settings does not save a named theme. Keep the draft's
         // starting colors too, so reopening Preferences keeps its unsaved state.
@@ -282,6 +283,20 @@ fn write_palettes(file: &KeyFile, prefix: &str, palettes: &Palettes) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_theme_is_light_gradient_but_saved_choices_are_kept() {
+        let expected = Appearance::builtin(BuiltinTheme::LightGradient);
+        assert_eq!(Config::default().appearance, expected);
+        let file = KeyFile::new();
+        assert_eq!(Config::decode(&file).appearance, expected);
+        file.set_integer("Appearance", "theme", -1);
+        assert_eq!(Config::decode(&file).appearance, expected);
+        file.set_integer("Appearance", "theme", BuiltinTheme::Original as i32);
+        assert_eq!(
+            Config::decode(&file).appearance,
+            Appearance::builtin(BuiltinTheme::Original)
+        );
+    }
     #[test]
     fn chart_order_roundtrip_keeps_disabled_positions() {
         let config = Config {

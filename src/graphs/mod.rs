@@ -28,7 +28,7 @@ impl Graphs {
             tooltips: tooltips(None, false),
             tick: 0,
             palette: std::array::from_fn(|kind| {
-                Palette::preset(crate::palette::BuiltinTheme::Original, kind)
+                Palette::preset(crate::palette::BuiltinTheme::default(), kind)
             }),
         }
     }

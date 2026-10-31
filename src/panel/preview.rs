@@ -37,7 +37,7 @@ pub fn run() -> ExitCode {
         let theme = args
             .theme
             .and_then(BuiltinTheme::from_id)
-            .unwrap_or(BuiltinTheme::Original);
+            .unwrap_or_default();
         let (width, height) = (
             args.render_width.unwrap_or(840),
             args.render_height.unwrap_or(64),
@@ -188,6 +188,8 @@ fn screenshot(prefs: &Preferences) {
     while gtk::events_pending() {
         gtk::main_iteration();
     }
+    // A layout change may be waiting for the next frame, not an event above.
+    prefs.dialog.check_resize();
     let surface = cairo::ImageSurface::create(
         cairo::Format::ARgb32,
         prefs.dialog.allocated_width(),

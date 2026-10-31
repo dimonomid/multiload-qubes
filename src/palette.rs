@@ -2,10 +2,11 @@
 
 // Built-in IDs persisted in panel settings.
 // Custom draft uses ID 1000 and is not a built-in palette.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum BuiltinTheme {
     Original = 0,
+    #[default]
     LightGradient = 1,
     Tango = 2,
     SolarizedDark = 3,
