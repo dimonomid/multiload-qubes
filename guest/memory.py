@@ -12,4 +12,4 @@ while True:
     # after a stop/restart. dom0 supplies the qube name; we do not send one.
     print('M2', domid, fields['MemTotal'], fields['MemAvailable'],
           fields['SwapTotal'], fields['SwapFree'], flush=True)
-    time.sleep(1)
+    time.sleep(0.5)

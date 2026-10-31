@@ -19,4 +19,4 @@ while True:
         except (OSError, ValueError):
             continue
     print('N1', time.monotonic_ns(), boot, ','.join(rows) or '-', flush=True)
-    time.sleep(1)
+    time.sleep(0.5)
