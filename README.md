@@ -67,6 +67,71 @@ Both components run in dom0.
 The service also sends small Python scripts to Linux qubes to collect RAM, swap
 and network data. Nothing needs to be installed in the qubes.
 
+## Security
+
+The collector runs as root in dom0. It reads CPU and RAM allocation from Xen,
+memory and disk statistics from dom0, and RAM, swap and network reports from
+qubes. The panel plugin runs as the desktop user and only reads the metrics
+file. It does not connect to qubes.
+
+```mermaid
+flowchart LR
+    subgraph Dom0[dom0]
+        Xen[Xen statistics and domain identities]
+        Host[dom0 memory and physical disk statistics]
+        Collector[Collector service - root]
+        Metrics["/run/multiload-qubes/metrics"]
+        Panel[XFCE panel plugin - desktop user]
+        Xen --> Collector
+        Host --> Collector
+        Collector -->|Starts scripts through qvm-run and qrexec| Reporters
+        Reporters -->|RAM, swap and network reports| Collector
+        Collector -->|Writes complete snapshots| Metrics
+        Metrics -->|Reads snapshots| Panel
+    end
+    subgraph Guests[Running qubes]
+        Reporters[Python RAM, swap and network reporters]
+    end
+```
+
+By default, the collector tries to collect RAM and swap from all eligible
+running qubes, and network data from `sys-net`. It does not start stopped
+qubes. Collection continues even if you remove the panel plugin; stop the
+systemd service `multiload-qubes-collector` to stop collection. The collector
+has two options to disable qubes communication:
+
+- `no-guest-memory`: if present, no RAM and swap info will be collected from
+  qubes
+- `no-network`: if present, no network info will be collected from `sys-net
+
+So when both of these flags are provided, it disables all qubes communication,
+and only xen data is used for the charts.
+
+Reports from qubes are treated as untrusted input. The collector checks their
+format and numbers, limits report size and frequency, and drops connections
+that stop reporting. Guest error messages are shortened and cleaned before
+being logged. Each connection has its own worker, so a slow qube does not
+hold up the other measurements. The metrics file is owned by root and replaced
+in one step, so the panel reads a complete snapshot. Missing or old reports
+are shown as unavailable.
+
+These checks do not prove that a report is true. A compromised qube can lie
+about its RAM or swap usage, and a compromised `sys-net` can lie about network
+traffic.
+
+The same root process currently reads Xen statistics and parses guest reports.
+The systemd service restricts filesystem writes and access to home directories,
+but it still has privileged Xen and Qubes access. Its operations are intended
+to only read statistics; those privileges do not enforce that limit. A bug in
+guest report handling could therefore affect dom0. Separating that code into
+a process with fewer privileges would improve this design, but is not
+implemented yet.
+
+Installing this package means trusting its code and the machine that built
+it, since it runs in dom0. CI signs pre-built RPMs and checksums with Sigstore,
+using its GitHub workflow identity. This lets you check where the package came
+from; it does not prove that the code is safe.
+
 ## Installation
 
 First you need the RPM package either download a pre-built one, or build it
