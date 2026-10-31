@@ -54,68 +54,64 @@ A filled chart with 2 stacked layers: reads and writes across physical disks,
 including activity from all qubes and dom0. The scale adjusts automatically to
 the traffic speed.
 
-## Building
+## Architecture
+
+The project consists of two components:
+
+- A systemd service collects data from Xen, dom0 and running qubes, and writes
+  it to `/run/multiload-qubes/metrics`.
+- An XFCE panel plugin reads that file and draws the charts.
+
+Both components run in dom0.
+
+The service also sends small Python scripts to Linux qubes to collect RAM, swap
+and network data. Nothing needs to be installed in the qubes.
+
+## Installation
+
+First you need the RPM package either download a pre-built one, or build it
+manually as explained below.
+
+With the `multiload-qubes.rpm` already in dom0, run in dom0:
 
 ```bash
-sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel xen-devel
+sudo dnf install ~/multiload-qubes.rpm
+sudo systemctl enable --now multiload-qubes-collector.service
+xfce4-panel -r
+```
+
+Then right-click on the xfce4 panel -> Panel -> Panel Preferences -> Items ->
+Add, and select **Multiload for Qubes**.
+
+Then, to change the settings, right-click the charts and select **Properties**.
+
+## Building
+
+Build in a Fedora qube matching your dom0 release:
+
+```bash
+sudo dnf install rust cargo gcc make pkgconf-pkg-config gtk3-devel xfce4-panel-devel xen-devel python3
 cargo fetch --locked
 make
 make test
 ```
 
-GTK3 bindings are enabled by the optional Cargo `panel` feature. A standalone
-collector build does not enable it:
+The plugin is built as `build/libmultiload-qubes.so`, and the collector as
+`target/release/multiload-qubes-collector`.
 
-```bash
-cargo build --release --offline --no-default-features --bin multiload-qubes-collector
-```
-
-`make` builds the collector first, then the panel library with `--features panel`,
-and keeps a separate panel archive in `build/` for the C adapter to link. This
-prevents standalone Cargo builds from replacing the panel archive with a library
-that has GTK disabled. The standalone preview is a Cargo binary (`src/bin/preview.rs`); it links no
-XFCE adapter. The UI modules live in `src/panel/`: preferences, config,
-theme files, runtime and preview/integration checks. Graph history, Rust-string
-tooltips and typed Cairo drawing live in `src/graphs/`. The panel calls that Rust
-API directly; there is no separate graph C API or raw Cairo-pointer interface.
-Only `native/plugin.c` uses the XFCE C API. Its Rust boundary is isolated in
-`src/panel/ffi.rs`: callback declarations, raw handle ownership and a safe Host
-wrapper. The panel runtime uses typed methods, and shutdown disconnects the host
-so retained modal callbacks cannot access a destroyed native plugin.
-
-The `panel` build uses cbindgen (a pinned Cargo build dependency) to generate
-`build/panel-api.h` directly from `src/panel/ffi.rs`. The C adapter includes this
-header instead of maintaining its own callback table and Rust function
-prototypes. The generated file is ignored by Git, regenerated when the Rust API
-or `cbindgen.toml` changes, and recreated if deleted. No separately installed
-cbindgen tool is required; `cargo fetch --locked` includes it for
-offline builds. Standalone collector builds do not enable this build dependency.
-
-Optional lint tools: `sudo dnf install rustfmt clippy`, then `make check`.
-Optional GUI tests: `sudo dnf install xorg-x11-server-Xvfb`, then `make gui-test`.
-These test the shared plugin entry point and widget lifecycle, as well as settings
-and persistence, using an isolated virtual display and temporary configuration.
-Rust/Cargo and the development dependencies have already been installed on this
-development machine. The plugin is not installed in your panel automatically.
-
-Run `build/multiload-qubes-preview` for a clearly labelled **simulated** preview.
-Add `--preferences` to inspect the Rust preferences dialog.
-It does not require Xen or alter the panel. For an image without a display:
-
-```bash
-build/multiload-qubes-preview --render build/preview.png
-```
-
-## Build an RPM for dom0
+### RPM for dom0
 
 ```bash
 sudo dnf install rpm-build systemd-rpm-macros
 make rpm
 ```
 
-`make rpm` runs the regular incremental build and tests in this checkout, then
-packages the resulting binaries. It reuses Cargo's normal `target/` directory;
-RPM packaging does not compile the project again or vendor dependencies.
-Binary RPMs are written under `build/rpm/RPMS/`. The initial checkout needs
-`cargo fetch --locked` once before the offline Make targets. The same command
-works in CI from a fresh checkout after fetching dependencies.
+The RPM is written to `build/rpm/RPMS/`. This uses the same build and runs tests
+before packaging.
+
+To copy the RPM from the build qube to dom0, run in dom0 (adjust the qube name
+and path):
+
+```bash
+qvm-run --pass-io dev 'cat /home/user/multiload-qubes.rpm' > ~/multiload-qubes.rpm
+```
