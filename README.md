@@ -38,6 +38,22 @@ Multiple independent lines chart, where every separate line corresponds to a
 particular qube, and a line going to 100% means that single qube is at full RAM
 capacity.
 
+### Network
+
+A filled chart with 2 stacked layers: incoming and outgoing traffic through
+sys-net. The scale adjusts automatically to the traffic speed.
+
+### Per-qube swap
+
+Multiple independent lines chart, where every separate line corresponds to a
+particular qube, and a line going to 100% means that single qube's swap is full.
+
+### Disk I/O
+
+A filled chart with 2 stacked layers: reads and writes across physical disks,
+including activity from all qubes and dom0. The scale adjusts automatically to
+the traffic speed.
+
 ## Building
 
 ```bash
