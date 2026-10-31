@@ -162,6 +162,8 @@ fn rect(
 
 impl Graphs {
     fn io_scale(&self, columns: usize, kind: i32) -> f64 {
+        // Keep small background transfers from filling the network chart.
+        let minimum = if kind == 2 { 256.0 * 1024.0 } else { 1024.0 };
         // The two rates are stacked, so the scale must cover their sum. Only
         // visible history counts; an old peak stops affecting the scale once it scrolls away.
         let peak = self
@@ -178,7 +180,7 @@ impl Graphs {
                 }
             })
             .map(|(rx, tx)| rx + tx)
-            .fold(1024.0, f64::max);
+            .fold(minimum, f64::max);
         2f64.powf(peak.log2().ceil())
     }
     fn chart(
@@ -424,10 +426,13 @@ mod tests {
         graphs.history.clear();
         sample.network = Some((4096.0, 4096.0));
         graphs.history.push_back(Some(sample.clone()));
-        assert_eq!(graphs.io_scale(2, 2), 8192.0);
+        assert_eq!(graphs.io_scale(2, 2), 256.0 * 1024.0);
+        sample.network = Some((200.0 * 1024.0, 200.0 * 1024.0));
+        graphs.history.push_back(Some(sample.clone()));
+        assert_eq!(graphs.io_scale(2, 2), 512.0 * 1024.0);
         sample.network = Some((0.0, 0.0));
         graphs.history.push_back(Some(sample));
-        assert_eq!(graphs.io_scale(1, 2), 1024.0);
+        assert_eq!(graphs.io_scale(1, 2), 256.0 * 1024.0);
     }
     #[test]
     fn disk_scale_covers_combined_rates_and_expires_old_peaks() {
@@ -530,7 +535,7 @@ mod tests {
         assert!(text(&g, 4, 5).contains("Scale: 4.00 MiB/s (read + write)"));
         // A narrower graph no longer includes the oldest peak. Query-time sizing
         // also covers vertical layouts and changes to which graphs are enabled.
-        assert!(text(&g, 2, 4).contains("Scale: 2.0 KiB/s"));
+        assert!(text(&g, 2, 4).contains("Scale: 256.0 KiB/s"));
         assert!(text(&g, 4, 4).contains("Scale: 4.0 KiB/s"));
         assert!(!text(&g, 1, 5).contains("Scale:"));
         // Border changes alter the visible history and therefore the scale.
@@ -542,7 +547,7 @@ mod tests {
         assert!(scale.contains("Scale: 2.00 MiB/s"));
 
         g.history.clear();
-        assert!(text(&g, 2, 5).contains("Scale: 1.0 KiB/s"));
+        assert!(text(&g, 2, 5).contains("Scale: 256.0 KiB/s"));
     }
 
     #[test]
