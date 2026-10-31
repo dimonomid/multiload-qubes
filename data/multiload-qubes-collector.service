@@ -6,7 +6,7 @@ ConditionPathExists=/dev/xen/privcmd
 [Service]
 Type=simple
 ExecStart=/usr/libexec/multiload-qubes-collector
-Restart=on-failure
+Restart=always
 RestartSec=3
 RuntimeDirectory=multiload-qubes
 RuntimeDirectoryMode=0755
