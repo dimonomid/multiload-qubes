@@ -3,7 +3,7 @@
 A native GTK3 XFCE panel plugin with scrolling charts for whole-machine CPU,
 RAM, network, swap and disk I/O, for [Qubes OS](https://www.qubes-os.org/).
 
-![Multiload-Qubes demo](https://dmitryfrank.com/_media/projects/multiload-qubes/multiload_qubes_demo_1.gif)
+![Multiload-Qubes demo](https://dmitryfrank.com/_media/projects/multiload-qubes/multiload-qubes-demo-3.gif)
 
 Inspired by good old [indicator-multiload](https://github.com/mh21/indicator-multiload)
 by Michael Hofmann, and the more modern [multiload-ng](https://github.com/udda/multiload-ng) by Mario Cianciolo.
@@ -14,50 +14,17 @@ the same functionality.
 Implemented from scratch, primarily in Rust, with a small C adapter for the
 XFCE plugin registration.
 
-## Graphs
+## Charts
 
-### Whole-machine CPU
+- Whole-machine CPU
+- Per-qube CPU
+- RAM (not just the xen-allocated RAM, but also the actually used amount in all running linux qubes)
+- Per-qube RAM
+- Network traffic (collected from `sys-net` by default; configurable)
+- Per-qube swap
+- Disk IO
 
-A single filled chart, 100% means the full machine's CPU capacity.
-
-### Per-qube CPU
-
-Multiple independent lines chart, where every separate line corresponds to a
-particular qube, and a line going to 100% means that single qube is at full CPU
-capacity.
-
-### Whole-machine RAM
-
-A filled chart with 3 stacked layers:
-
-- Used (reported as actually used by individual linux qubes, summed up)
-- Allocated but unknown (e.g. allocated to non-linux qubes where we don't
-  collect actual usage)
-- Allocated but spare (reported as unused by individual linux qubes, summed up)
-
-Where 100% is full machine RAM.
-
-### Per-qube RAM
-
-Multiple independent lines chart, where every separate line corresponds to a
-particular qube, and a line going to 100% means that single qube is at full RAM
-capacity.
-
-### Network
-
-A filled chart with 2 stacked layers: incoming and outgoing traffic through
-sys-net. The scale adjusts automatically to the traffic speed.
-
-### Per-qube swap
-
-Multiple independent lines chart, where every separate line corresponds to a
-particular qube, and a line going to 100% means that single qube's swap is full.
-
-### Disk I/O
-
-A filled chart with 2 stacked layers: reads and writes across physical disks,
-including activity from all qubes and dom0. The scale adjusts automatically to
-the traffic speed.
+Charts can be reordered and enabled/disabled individually; all colors are configurable.
 
 ## Architecture
 
