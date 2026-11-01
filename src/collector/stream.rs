@@ -10,6 +10,7 @@ use crate::metrics::publish_bytes;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{killpg, Signal};
+use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
@@ -105,8 +106,9 @@ impl Default for Timing {
     }
 }
 
-// Dropping on any error/stop terminates the entire local qvm-run process group.
-// Guest scripts exit when their stdin closes (or a write sees a broken pipe).
+// Signal the local qvm-run process group on error or stop. Descendants that
+// leave the group are outside this cleanup. Bundled guest scripts exit when
+// their stdin closes (or a write sees a broken pipe).
 struct Process(Child);
 impl Process {
     fn signal_group(&self, signal: Signal) {
@@ -123,11 +125,24 @@ impl Drop for Process {
         self.signal_group(Signal::SIGTERM);
         let deadline = Instant::now() + PROCESS_EXIT_GRACE;
         loop {
-            match self.0.try_wait() {
-                Ok(Some(_)) => return,
-                _ if Instant::now() >= deadline => break,
-                _ => thread::sleep(POLL_INTERVAL),
+            // Keep the parent unreaped so its PID/group ID cannot be reused
+            // before we send the final signal to any remaining group members.
+            match waitid(
+                Id::Pid(Pid::from_raw(self.0.id() as i32)),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+            ) {
+                Ok(WaitStatus::StillAlive) | Err(Errno::EINTR) => {}
+                Ok(_) => break,
+                Err(Errno::ECHILD) => return, // The child is no longer ours to reap.
+                Err(error) => {
+                    eprintln!("Cannot check guest process {}: {error}", self.0.id());
+                    break;
+                }
             }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(POLL_INTERVAL);
         }
         self.signal_group(Signal::SIGKILL);
         let _ = self.0.wait();
@@ -590,6 +605,30 @@ mod tests {
                 Instant::now() < deadline,
                 "descendant survived process-group cleanup"
             );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn process_cleanup_kills_term_ignoring_descendant_after_parent_exits() {
+        let mut proc = spawn_process("import subprocess,sys,time; child=subprocess.Popen([sys.executable,'-u','-c',\"import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(30)\"],stdout=subprocess.PIPE); child.stdout.readline(); print(child.pid,flush=True); time.sleep(30)");
+        let parent = Pid::from_raw(proc.0.id() as i32);
+        let child: u32 = ready_line(&mut proc).parse().unwrap();
+        drop(proc);
+        assert_eq!(nix::sys::signal::kill(parent, None), Err(Errno::ESRCH));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).ok();
+            if stat.as_ref().is_none_or(|s| {
+                s.split_once(") ")
+                    .is_some_and(|(_, state)| state.starts_with('Z'))
+            }) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                // A failing regression test must not leave the helper running.
+                let _ = nix::sys::signal::kill(Pid::from_raw(child as i32), Signal::SIGKILL);
+                panic!("SIGTERM-ignoring descendant survived its parent's cleanup");
+            }
             thread::sleep(Duration::from_millis(10));
         }
     }
