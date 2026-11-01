@@ -5,6 +5,7 @@ use super::{
     themes::ThemeStore,
     Panel,
 };
+use crate::charts::ChartKind;
 use crate::palette::BuiltinTheme;
 use clap::Parser;
 use gtk::prelude::*;
@@ -54,7 +55,7 @@ pub fn run() -> ExitCode {
             &context,
             width,
             height,
-            &super::config::CHART_KINDS,
+            &crate::charts::ChartKind::ALL,
             false,
         );
         return match std::fs::File::create(path)
@@ -204,7 +205,7 @@ fn screenshot(prefs: &Preferences) {
 }
 fn chart_order_test() {
     let panel = Panel::new(None, true);
-    panel.config.borrow_mut().enabled = [true; 7];
+    panel.config.borrow_mut().enabled = [true; ChartKind::COUNT];
     let editor = prefs(&panel);
     assert!(!editor.move_up.is_sensitive());
     assert!(!editor.enable_chart.is_sensitive());
@@ -227,8 +228,19 @@ fn chart_order_test() {
     editor.disable_chart.emit_clicked();
     assert_eq!(panel.config.borrow().order, Config::default().order);
     editor.dialog.response(gtk::ResponseType::Ok);
-    assert_eq!(panel.config.borrow().order, [1, 2, 3, 4, 5, 6, 0]);
-    assert!(!panel.config.borrow().enabled[0]);
+    assert_eq!(
+        panel.config.borrow().order,
+        [
+            ChartKind::QubeCpu,
+            ChartKind::Ram,
+            ChartKind::QubeRam,
+            ChartKind::Network,
+            ChartKind::Swap,
+            ChartKind::Disk,
+            ChartKind::Cpu
+        ]
+    );
+    assert!(!panel.config.borrow().enabled[ChartKind::Cpu.index()]);
     let kinds = panel.config.borrow().visible_kinds();
     for vertical in [false, true] {
         let (w, h) = if vertical { (48, 288) } else { (288, 48) };
@@ -248,8 +260,19 @@ fn chart_order_test() {
     editor.enable_chart.emit_clicked();
     editor.move_up.emit_clicked();
     editor.dialog.response(gtk::ResponseType::Cancel);
-    assert_eq!(panel.config.borrow().order, [1, 2, 3, 4, 5, 6, 0]);
-    assert!(!panel.config.borrow().enabled[0]);
+    assert_eq!(
+        panel.config.borrow().order,
+        [
+            ChartKind::QubeCpu,
+            ChartKind::Ram,
+            ChartKind::QubeRam,
+            ChartKind::Network,
+            ChartKind::Swap,
+            ChartKind::Disk,
+            ChartKind::Cpu
+        ]
+    );
+    assert!(!panel.config.borrow().enabled[ChartKind::Cpu.index()]);
     let editor = prefs(&panel);
     for _ in 0..5 {
         editor.disable_chart.emit_clicked();
@@ -279,9 +302,15 @@ fn self_test() {
     prefs.select(&draft);
     assert!(!prefs.editor.borrow().unsaved());
     prefs.select(&light); // No discard dialog for an untouched draft.
-    assert_eq!(prefs.editor.borrow().palettes[0].colors[1], 0xFDF6E3FF);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].colors[1],
+        0xFDF6E3FF
+    );
     prefs.select(&gradient);
-    assert_eq!(prefs.editor.borrow().palettes[0].colors[2], 0xFDF6E300);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].colors[2],
+        0xFDF6E300
+    );
     prefs.border.set_value(2.);
     assert!(prefs.editor.borrow().unsaved());
     prefs.border.set_value(0.);
@@ -297,7 +326,10 @@ fn self_test() {
     prefs.theme.set_active_id(Some(&tango));
     assert_eq!(keep.get(), 1);
     assert!(prefs.editor.borrow().unsaved());
-    assert_eq!(prefs.editor.borrow().palettes[0].border, 2);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].border,
+        2
+    );
     // Live preview must not leak into the committed panel settings/autosave.
     assert_eq!(panel.config.borrow().appearance, Appearance::default());
     click(&prefs.save_as, vec![Prompt::Name("Cream / Ω")]);
@@ -312,7 +344,7 @@ fn self_test() {
     prefs.select(&format!("saved:{id}"));
     prefs.border.set_value(3.);
     assert_eq!(
-        prefs.store.borrow().find(&id).unwrap().palettes[0].border,
+        prefs.store.borrow().find(&id).unwrap().palettes[ChartKind::Cpu.index()].border,
         2
     );
     click(
@@ -324,7 +356,7 @@ fn self_test() {
     );
     assert!(prefs.editor.borrow().unsaved());
     assert_eq!(
-        prefs.store.borrow().find(&id).unwrap().palettes[0].border,
+        prefs.store.borrow().find(&id).unwrap().palettes[ChartKind::Cpu.index()].border,
         2
     );
     click(
@@ -338,7 +370,7 @@ fn self_test() {
     prefs.border.set_value(4.);
     click(&prefs.save_changes, vec![message("Overwrite theme", true)]);
     assert_eq!(
-        prefs.store.borrow().find(&id).unwrap().palettes[0].border,
+        prefs.store.borrow().find(&id).unwrap().palettes[ChartKind::Cpu.index()].border,
         4
     );
     click(&prefs.rename, vec![Prompt::Name("Renamed cream")]);
@@ -364,9 +396,12 @@ fn self_test() {
         ],
     );
     assert!(prefs.editor.borrow().unsaved());
-    assert_eq!(prefs.editor.borrow().palettes[0].border, 5);
     assert_eq!(
-        prefs.store.borrow().find(&id).unwrap().palettes[0].border,
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].border,
+        5
+    );
+    assert_eq!(
+        prefs.store.borrow().find(&id).unwrap().palettes[ChartKind::Cpu.index()].border,
         4
     );
     std::fs::remove_file(&dir).unwrap();
@@ -379,9 +414,15 @@ fn self_test() {
     assert_eq!(prefs.store.borrow().themes.len(), 2);
     click(&prefs.delete, vec![message("Delete theme ‘Second’?", true)]);
     assert!(!prefs.editor.borrow().unsaved());
-    assert_eq!(prefs.editor.borrow().palettes[0].border, 5);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].border,
+        5
+    );
     prefs.theme.set_active_id(Some(&format!("saved:{id}")));
-    assert_eq!(prefs.editor.borrow().palettes[0].border, 4);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::Cpu.index()].border,
+        4
+    );
     prefs.dialog.response(ResponseType::Ok);
     let path = glib::user_config_dir().join("panel-roundtrip.rc");
     panel.config.borrow().save(&path).unwrap();
@@ -391,11 +432,19 @@ fn self_test() {
         prefs.editor.borrow().selection,
         Selection::Saved(_)
     ));
-    prefs.chart.set_active(Some(3));
+    prefs
+        .chart
+        .set_active(Some(ChartKind::QubeRam.index() as u32));
     prefs.transparent.set_active(true);
     emit_color(&prefs, 3, gtk::gdk::RGBA::new(0.2, 0.4, 0.6, 0.5));
-    assert_eq!(prefs.editor.borrow().palettes[5].colors[3], 0x33669980);
-    assert_eq!(prefs.editor.borrow().palettes[5].colors[1] & 255, 0);
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::QubeRam.index()].colors[3],
+        0x33669980
+    );
+    assert_eq!(
+        prefs.editor.borrow().palettes[ChartKind::QubeRam.index()].colors[1] & 255,
+        0
+    );
     screenshot(&prefs);
     prefs.width.set_value(64.);
     prefs
@@ -408,10 +457,11 @@ fn self_test() {
     assert!(loaded.appearance.unsaved());
     assert_eq!(loaded.appearance.selection.source(), Some(id.as_str()));
     assert_eq!(loaded.width, 64);
-    assert!(!loaded.enabled[0]);
+    assert!(!loaded.enabled[ChartKind::Cpu.index()]);
     assert_eq!(
-        ThemeStore::load().0.find(&id).unwrap().palettes[5].colors[3],
-        Appearance::builtin(BuiltinTheme::LightGradient).palettes[5].colors[3]
+        ThemeStore::load().0.find(&id).unwrap().palettes[ChartKind::QubeRam.index()].colors[3],
+        Appearance::builtin(BuiltinTheme::LightGradient).palettes[ChartKind::QubeRam.index()]
+            .colors[3]
     );
     let committed = panel.config.borrow().clone();
     let prefs = super::preview::prefs(&panel);
@@ -426,10 +476,21 @@ fn self_test() {
     assert_eq!(panel.graphs.borrow().palette, committed.appearance.palettes);
     panel.vertical.set(true);
     panel.resize();
-    let kinds = [0, 1, 2, 3];
-    assert_eq!(super::chart_at(&kinds, false, 130, 49, 32, 0).unwrap().0, 1);
+    let kinds = [
+        ChartKind::Cpu,
+        ChartKind::Ram,
+        ChartKind::Network,
+        ChartKind::Swap,
+    ];
+    assert_eq!(
+        super::chart_at(&kinds, false, 130, 49, 32, 0).unwrap().0,
+        ChartKind::Ram
+    );
     assert!(super::chart_at(&kinds, false, 130, 49, 128, 0).is_none());
-    assert_eq!(super::chart_at(&kinds, true, 49, 130, 0, 64).unwrap().0, 2);
+    assert_eq!(
+        super::chart_at(&kinds, true, 49, 130, 0, 64).unwrap().0,
+        ChartKind::Network
+    );
     ThemeStore::load().0.delete(&id).unwrap();
     panel.shutdown();
     for action in 0..2 {
@@ -451,11 +512,11 @@ fn self_test() {
     println!("Rust GTK: themes, discard/overwrite, errors, settings, tooltips, orientation and modal teardown: passed");
 }
 fn renderer_test() {
-    for kind in 0..7 {
+    for kind in ChartKind::ALL {
         let mut graphs = crate::Graphs::new();
-        graphs.palette[kind].colors.fill(0);
-        graphs.palette[kind].colors[0] = 0xFF000080;
-        graphs.palette[kind].border = 3;
+        graphs.palette[kind.index()].colors.fill(0);
+        graphs.palette[kind.index()].colors[0] = 0xFF000080;
+        graphs.palette[kind.index()].border = 3;
         let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 20, 20).unwrap();
         {
             let cr = cairo::Context::new(&surface).unwrap();

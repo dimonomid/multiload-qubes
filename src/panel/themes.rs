@@ -1,5 +1,6 @@
 //! Versioned GLib key files shared by panel instances. No GTK widgets here.
 use super::config::Palettes;
+use crate::charts::{ChartKind, CHARTS};
 use crate::palette::BuiltinTheme;
 use gio::prelude::*;
 use glib::KeyFile;
@@ -11,15 +12,6 @@ pub const BUILTINS: [(BuiltinTheme, &str); 5] = [
     (BuiltinTheme::Tango, "Tango"),
     (BuiltinTheme::SolarizedDark, "Solarized Dark"),
     (BuiltinTheme::SolarizedLight, "Solarized Light"),
-];
-const GROUPS: [&str; 7] = [
-    "CPU",
-    "RAM",
-    "Network",
-    "Swap",
-    "Disk",
-    "PerQubeRAM",
-    "PerQubeCPU",
 ];
 const KEYS: [&str; 7] = [
     "Border",
@@ -71,9 +63,12 @@ impl SavedTheme {
         if !valid_name(&name) || reserved_name(&name) {
             return Err("Invalid or reserved theme name".into());
         }
-        let mut palettes =
-            std::array::from_fn(|k| crate::palette::Palette::preset(BuiltinTheme::Original, k));
-        for (k, group) in GROUPS.iter().enumerate() {
+        let mut palettes = std::array::from_fn(|k| {
+            crate::palette::Palette::preset(BuiltinTheme::Original, ChartKind::ALL[k])
+        });
+        for chart in &CHARTS {
+            let k = chart.kind.index();
+            let group = chart.theme_group;
             for (f, key) in KEYS.iter().enumerate() {
                 let value = file.string(group, key).map_err(|e| e.to_string())?;
                 if value.len() != 9
@@ -103,7 +98,9 @@ impl SavedTheme {
         let file = KeyFile::new();
         file.set_integer("Theme", "Version", 1);
         file.set_string("Theme", "Name", &self.name);
-        for (k, group) in GROUPS.iter().enumerate() {
+        for chart in &CHARTS {
+            let k = chart.kind.index();
+            let group = chart.theme_group;
             for (key, value) in KEYS.iter().zip(self.palettes[k].colors) {
                 file.set_string(group, key, &format!("#{value:08X}"));
             }
@@ -257,7 +254,7 @@ mod tests {
         assert!(errors.is_empty());
         let mut palettes =
             super::super::config::Appearance::builtin(BuiltinTheme::LightGradient).palettes;
-        palettes[0].colors[3] = 0x33669980;
+        palettes[ChartKind::Cpu.index()].colors[3] = 0x33669980;
         let id = store.write(None, "Cream / Ω", palettes).unwrap();
         let (loaded, errors) = ThemeStore::load_from(store.dir.clone());
         assert!(errors.is_empty());

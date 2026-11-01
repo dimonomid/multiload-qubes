@@ -4,6 +4,7 @@
 //! they must not look like measured zero usage.
 mod domain_graph;
 mod input;
+use crate::charts::ChartKind;
 use crate::palette::source;
 use crate::palette::Palette;
 use domain_graph::Metric;
@@ -16,9 +17,9 @@ use crate::Snapshot;
 
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
-    tooltips: [String; 7],
+    tooltips: [String; ChartKind::COUNT],
     tick: u64,
-    pub(crate) palette: [Palette; 7],
+    pub(crate) palette: [Palette; ChartKind::COUNT],
 }
 
 impl Graphs {
@@ -28,7 +29,10 @@ impl Graphs {
             tooltips: tooltips(None, false),
             tick: 0,
             palette: std::array::from_fn(|kind| {
-                Palette::preset(crate::palette::BuiltinTheme::default(), kind)
+                Palette::preset(
+                    crate::palette::BuiltinTheme::default(),
+                    ChartKind::ALL[kind],
+                )
             }),
         }
     }
@@ -81,7 +85,7 @@ impl Graphs {
     }
 }
 
-fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; 7] {
+fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; ChartKind::COUNT] {
     let text = if let Some(s) = sample {
         let cpu = s
             .cpu
@@ -120,18 +124,18 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; 7] {
             }
             None => "Disk: unavailable (collection failure or legacy collector)".into(),
         };
-        [
-            format!("CPU: {cpu}\n100% = all host logical CPUs busy."),
-            ram,
-            network,
-            domain_graph::tooltip(s.swap.as_ref(), Metric::Swap),
-            disk,
-            domain_graph::tooltip(s.qube_ram.as_ref(), Metric::Ram),
-            domain_graph::cpu_tooltip(s.qube_cpu.as_ref()),
-        ]
+        ChartKind::ALL.map(|kind| match kind {
+            ChartKind::Cpu => format!("CPU: {cpu}\n100% = all host logical CPUs busy."),
+            ChartKind::Ram => ram.clone(),
+            ChartKind::Network => network.clone(),
+            ChartKind::Swap => domain_graph::tooltip(s.swap.as_ref(), Metric::Swap),
+            ChartKind::Disk => disk.clone(),
+            ChartKind::QubeRam => domain_graph::tooltip(s.qube_ram.as_ref(), Metric::Ram),
+            ChartKind::QubeCpu => domain_graph::cpu_tooltip(s.qube_cpu.as_ref()),
+        })
     } else {
-        ["CPU", "RAM", "Network", "Swap", "Disk", "Qube RAM", "Qube CPU"].map(|name| format!(
-            "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service and multiload-qubes-parser.service in dom0."
+        ChartKind::ALL.map(|kind| format!(
+            "{}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service and multiload-qubes-parser.service in dom0.", kind.metadata().name
         ))
     };
     text.map(|text| {
@@ -168,9 +172,13 @@ fn rect(
 }
 
 impl Graphs {
-    fn io_scale(&self, columns: usize, kind: i32) -> f64 {
+    fn io_scale(&self, columns: usize, kind: ChartKind) -> f64 {
         // Keep small background transfers from filling the network chart.
-        let minimum = if kind == 2 { 256.0 * 1024.0 } else { 1024.0 };
+        let minimum = if kind == ChartKind::Network {
+            256.0 * 1024.0
+        } else {
+            1024.0
+        };
         // The two rates are stacked, so the scale must cover their sum. Only
         // visible history counts; an old peak stops affecting the scale once it scrolls away.
         let peak = self
@@ -180,7 +188,7 @@ impl Graphs {
             .take(columns)
             .filter_map(|s| {
                 let s = s.as_ref()?;
-                if kind == 4 {
+                if kind == ChartKind::Disk {
                     s.disk.as_ref()?.rates
                 } else {
                     s.network
@@ -195,9 +203,9 @@ impl Graphs {
         cr: &cairo::Context,
         width: i32,
         height: i32,
-        kind: i32,
+        kind: ChartKind,
     ) -> Result<(), cairo::Error> {
-        let palette = &self.palette[kind as usize];
+        let palette = &self.palette[kind.index()];
         let border = palette
             .border
             .min(((width.min(height) - 2) / 2).max(0) as u32) as i32;
@@ -231,18 +239,14 @@ impl Graphs {
                 1.0,
             )?;
         }
-        if matches!(kind, 3 | 5 | 6) {
-            self.domain_chart(
-                cr,
-                width,
-                height,
-                palette,
-                match kind {
-                    6 => Metric::Cpu,
-                    5 => Metric::Ram,
-                    _ => Metric::Swap,
-                },
-            )?;
+        let domain_metric = match kind {
+            ChartKind::QubeCpu => Some(Metric::Cpu),
+            ChartKind::QubeRam => Some(Metric::Ram),
+            ChartKind::Swap => Some(Metric::Swap),
+            ChartKind::Cpu | ChartKind::Ram | ChartKind::Network | ChartKind::Disk => None,
+        };
+        if let Some(metric) = domain_metric {
+            self.domain_chart(cr, width, height, palette, metric)?;
             cr.restore()?;
             return Ok(());
         }
@@ -251,7 +255,7 @@ impl Graphs {
         for (i, sample) in self.history.iter().skip(self.history.len() - n).enumerate() {
             let x = w - 1.0 - n as f64 + i as f64;
             if let Some(s) = sample {
-                if kind == 1 {
+                if kind == ChartKind::Ram {
                     let used = s.used as f64 / s.total as f64 * (h - 2.0);
                     let allocated = s.allocated as f64 / s.total as f64 * (h - 2.0);
                     let unknown = s.unknown as f64 / s.total as f64 * (h - 2.0);
@@ -276,8 +280,8 @@ impl Graphs {
                         )?;
                     }
                     rect(cr, palette.colors[3], x, h - 1.0 - used, 1.0, used)?;
-                } else if kind == 2 || kind == 4 {
-                    let (rates, read_color, write_color) = if kind == 4 {
+                } else if kind.is_io() {
+                    let (rates, read_color, write_color) = if kind == ChartKind::Disk {
                         (
                             s.disk.as_ref().and_then(|d| d.rates),
                             palette.colors[3],
@@ -316,27 +320,24 @@ impl Graphs {
 impl Graphs {
     pub(crate) fn tooltip(
         &self,
-        kind: usize,
+        kind: ChartKind,
         chart_width: i32,
         chart_height: i32,
-    ) -> Option<Cow<'_, str>> {
-        let text = self.tooltips.get(kind)?;
-        if matches!(kind, 2 | 4) && chart_width >= 4 {
-            let border = self.palette[kind]
+    ) -> Cow<'_, str> {
+        let text = &self.tooltips[kind.index()];
+        if kind.is_io() && chart_width >= 4 {
+            let border = self.palette[kind.index()]
                 .border
                 .min(((chart_width.min(chart_height.max(4)) - 2) / 2) as u32);
-            let scale = self.io_scale((chart_width - 2 * border as i32) as usize, kind as i32);
-            let combined = if kind == 2 {
+            let scale = self.io_scale((chart_width - 2 * border as i32) as usize, kind);
+            let combined = if kind == ChartKind::Network {
                 "in + out"
             } else {
                 "read + write"
             };
-            Some(Cow::Owned(format!(
-                "{text}\nScale: {} ({combined})",
-                rate_text(scale)
-            )))
+            Cow::Owned(format!("{text}\nScale: {} ({combined})", rate_text(scale)))
         } else {
-            Some(Cow::Borrowed(text))
+            Cow::Borrowed(text)
         }
     }
     pub(crate) fn draw(
@@ -344,7 +345,7 @@ impl Graphs {
         cr: &cairo::Context,
         width: i32,
         height: i32,
-        kinds: &[usize],
+        kinds: &[ChartKind],
         vertical: bool,
     ) -> Result<(), cairo::Error> {
         if width < 4 || height < 4 {
@@ -372,7 +373,7 @@ impl Graphs {
                     if vertical { ch as f64 } else { 0. },
                 );
             }
-            self.chart(cr, cw, ch, kind as i32)?;
+            self.chart(cr, cw, ch, kind)?;
         }
         cr.restore()
     }
@@ -390,7 +391,8 @@ mod tests {
         sample.allocated = 75;
         sample.used = 25;
         sample.unknown = 25;
-        graphs.palette[1].colors = [0, 0, 0, 0x00FF0080, 0x0000FF80, 0xFF000080, 0];
+        graphs.palette[ChartKind::Ram.index()].colors =
+            [0, 0, 0, 0x00FF0080, 0x0000FF80, 0xFF000080, 0];
         for unknown in [25, 0, 75] {
             sample.unknown = unknown;
             sample.used = if unknown == 75 { 0 } else { 25 };
@@ -399,7 +401,9 @@ mod tests {
             let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 8, 100).unwrap();
             {
                 let context = cairo::Context::new(&surface).unwrap();
-                graphs.draw(&context, 8, 100, &[1], false).unwrap();
+                graphs
+                    .draw(&context, 8, 100, &[ChartKind::Ram], false)
+                    .unwrap();
             }
             let stride = surface.stride() as usize;
             let pixels = surface.data().unwrap();
@@ -433,13 +437,13 @@ mod tests {
         graphs.history.clear();
         sample.network = Some((4096.0, 4096.0));
         graphs.history.push_back(Some(sample.clone()));
-        assert_eq!(graphs.io_scale(2, 2), 256.0 * 1024.0);
+        assert_eq!(graphs.io_scale(2, ChartKind::Network), 256.0 * 1024.0);
         sample.network = Some((200.0 * 1024.0, 200.0 * 1024.0));
         graphs.history.push_back(Some(sample.clone()));
-        assert_eq!(graphs.io_scale(2, 2), 512.0 * 1024.0);
+        assert_eq!(graphs.io_scale(2, ChartKind::Network), 512.0 * 1024.0);
         sample.network = Some((0.0, 0.0));
         graphs.history.push_back(Some(sample));
-        assert_eq!(graphs.io_scale(1, 2), 256.0 * 1024.0);
+        assert_eq!(graphs.io_scale(1, ChartKind::Network), 256.0 * 1024.0);
     }
     #[test]
     fn disk_scale_covers_combined_rates_and_expires_old_peaks() {
@@ -449,23 +453,23 @@ mod tests {
         g.history.clear();
         sample.disk.as_mut().unwrap().rates = Some((4096.0, 4096.0));
         g.history.push_back(Some(sample.clone()));
-        assert_eq!(g.io_scale(2, 4), 8192.0);
+        assert_eq!(g.io_scale(2, ChartKind::Disk), 8192.0);
         sample.disk.as_mut().unwrap().rates = Some((0.0, 0.0));
         g.history.push_back(Some(sample.clone()));
-        assert_eq!(g.io_scale(1, 4), 1024.0);
+        assert_eq!(g.io_scale(1, ChartKind::Disk), 1024.0);
         sample.disk.as_mut().unwrap().rates = None;
-        assert!(tooltips(Some(&sample), false)[4]
+        assert!(tooltips(Some(&sample), false)[ChartKind::Disk.index()]
             .as_str()
             .contains("warming up"));
-        assert!(tooltips(Some(&sample), false)[4]
+        assert!(tooltips(Some(&sample), false)[ChartKind::Disk.index()]
             .as_str()
             .contains("nvme0n1"));
         sample.disk.as_mut().unwrap().devices.clear();
-        assert!(tooltips(Some(&sample), false)[4]
+        assert!(tooltips(Some(&sample), false)[ChartKind::Disk.index()]
             .as_str()
             .contains("no supported physical disks"));
         sample.disk = None;
-        assert!(tooltips(Some(&sample), false)[4]
+        assert!(tooltips(Some(&sample), false)[ChartKind::Disk.index()]
             .as_str()
             .starts_with("Disk: unavailable"));
     }
@@ -475,35 +479,35 @@ mod tests {
         let mut graphs = Graphs::new();
         graphs.update(true);
         let expected = [
-            "CPU:",
-            "Known used RAM:",
-            "Network in:",
-            "Swap:",
-            "Disk read:",
-            "Qube RAM:",
-            "Qube CPU:",
+            (ChartKind::Cpu, "CPU:"),
+            (ChartKind::Ram, "Known used RAM:"),
+            (ChartKind::Network, "Network in:"),
+            (ChartKind::Swap, "Swap:"),
+            (ChartKind::Disk, "Disk read:"),
+            (ChartKind::QubeRam, "Qube RAM:"),
+            (ChartKind::QubeCpu, "Qube CPU:"),
         ];
-        for (kind, label) in expected.iter().enumerate() {
-            let text = graphs.tooltips[kind].as_str();
+        for (kind, label) in expected {
+            let text = graphs.tooltips[kind.index()].as_str();
             let body = text.strip_prefix("DEMO — simulated data\n").unwrap();
             assert!(body.starts_with(label));
-            for (other, other_label) in expected.iter().enumerate() {
+            for (other, other_label) in expected {
                 if other != kind {
                     assert!(!body.lines().any(|line| line.starts_with(other_label)));
                 }
             }
             assert!(text.contains("DEMO"));
-            assert_eq!(graphs.tooltip(kind, 0, 0).as_deref(), Some(text));
+            assert_eq!(graphs.tooltip(kind, 0, 0).as_ref(), text);
         }
         let missing = tooltips(None, false);
         for (text, label) in missing.iter().zip([
             "CPU:",
+            "Per-qube CPU:",
             "RAM:",
+            "Per-qube RAM:",
             "Network:",
-            "Swap:",
-            "Disk:",
-            "Qube RAM:",
-            "Qube CPU:",
+            "Per-qube swap:",
+            "Disk I/O:",
         ]) {
             assert!(text.as_str().starts_with(label));
             assert!(text.as_str().contains("unavailable or stale"));
@@ -513,21 +517,25 @@ mod tests {
         sample.network = None;
         sample.swap = None;
         let warming = tooltips(Some(&sample), false);
-        assert!(warming[0].as_str().contains("warming up"));
-        assert!(warming[2].as_str().contains("warming up"));
-        assert!(warming[3].as_str().starts_with("Swap: unavailable"));
-        assert!(graphs.tooltip(usize::MAX, 120, 48).is_none());
-        assert!(graphs.tooltip(7, 120, 48).is_none());
+        assert!(warming[ChartKind::Cpu.index()]
+            .as_str()
+            .contains("warming up"));
+        assert!(warming[ChartKind::Network.index()]
+            .as_str()
+            .contains("warming up"));
+        assert!(warming[ChartKind::Swap.index()]
+            .as_str()
+            .starts_with("Swap: unavailable"));
     }
 
     #[test]
     fn tooltip_scale_matches_visible_columns_and_updates_after_resize() {
-        fn text(g: &Graphs, kind: usize, width: i32) -> String {
-            g.tooltip(kind, width, 48).unwrap().into_owned()
+        fn text(g: &Graphs, kind: ChartKind, width: i32) -> String {
+            g.tooltip(kind, width, 48).into_owned()
         }
         let mut g = Graphs::new();
-        g.palette[2].border = 1;
-        g.palette[4].border = 1;
+        g.palette[ChartKind::Network.index()].border = 1;
+        g.palette[ChartKind::Disk.index()].border = 1;
         g.update(true);
         let mut sample = g.history.back().unwrap().clone().unwrap();
         g.history.clear();
@@ -538,23 +546,23 @@ mod tests {
         sample.disk.as_mut().unwrap().rates = Some((2048.0, 2048.0));
         g.history.push_back(Some(sample.clone()));
         g.history.push_back(Some(sample));
-        assert!(text(&g, 2, 5).contains("Scale: 2.00 MiB/s (in + out)"));
-        assert!(text(&g, 4, 5).contains("Scale: 4.00 MiB/s (read + write)"));
+        assert!(text(&g, ChartKind::Network, 5).contains("Scale: 2.00 MiB/s (in + out)"));
+        assert!(text(&g, ChartKind::Disk, 5).contains("Scale: 4.00 MiB/s (read + write)"));
         // A narrower graph no longer includes the oldest peak. Query-time sizing
         // also covers vertical layouts and changes to which graphs are enabled.
-        assert!(text(&g, 2, 4).contains("Scale: 256.0 KiB/s"));
-        assert!(text(&g, 4, 4).contains("Scale: 4.0 KiB/s"));
-        assert!(!text(&g, 1, 5).contains("Scale:"));
+        assert!(text(&g, ChartKind::Network, 4).contains("Scale: 256.0 KiB/s"));
+        assert!(text(&g, ChartKind::Disk, 4).contains("Scale: 4.0 KiB/s"));
+        assert!(!text(&g, ChartKind::Ram, 5).contains("Scale:"));
         // Border changes alter the visible history and therefore the scale.
-        g.palette[2].border = 0;
-        assert!(text(&g, 2, 4).contains("Scale: 2.00 MiB/s"));
-        g.palette[2].border = 16;
-        let scale = g.tooltip(2, 5, 4).unwrap();
+        g.palette[ChartKind::Network.index()].border = 0;
+        assert!(text(&g, ChartKind::Network, 4).contains("Scale: 2.00 MiB/s"));
+        g.palette[ChartKind::Network.index()].border = 16;
+        let scale = g.tooltip(ChartKind::Network, 5, 4);
         // Clamp the border using both dimensions, just as the renderer does.
         assert!(scale.contains("Scale: 2.00 MiB/s"));
 
         g.history.clear();
-        assert!(text(&g, 2, 5).contains("Scale: 256.0 KiB/s"));
+        assert!(text(&g, ChartKind::Network, 5).contains("Scale: 256.0 KiB/s"));
     }
 
     #[test]

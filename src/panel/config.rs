@@ -3,26 +3,11 @@
 //! The panel keeps its own copy of the colors, even for a named theme. A draft
 //! also keeps its starting colors so we can tell whether it has unsaved edits.
 use super::themes::ThemeStore;
+use crate::charts::{ChartKind, CHARTS};
 use crate::palette::{BuiltinTheme, Palette};
 use glib::KeyFile;
 use std::path::Path;
 
-pub const CHART_NAMES: [&str; 7] = [
-    "CPU",
-    "Per-qube CPU",
-    "RAM",
-    "Per-qube RAM",
-    "Network",
-    "Per-qube swap",
-    "Disk I/O",
-];
-// Names, keys, enabled flags and order use the settings index. This table maps
-// that index to the renderer/palette index; the two orders are different.
-pub const CHART_KINDS: [usize; 7] = [0, 6, 1, 5, 2, 3, 4];
-const CHART_KEYS: [&str; 7] = [
-    "cpu", "qube_cpu", "ram", "qube_ram", "network", "swap", "disk",
-];
-const DEFAULT_ENABLED: [bool; 7] = [true, false, true, false, true, true, true];
 const COLOR_KEYS: [&str; 7] = [
     "border",
     "background_top",
@@ -32,7 +17,7 @@ const COLOR_KEYS: [&str; 7] = [
     "series3",
     "missing",
 ];
-pub type Palettes = [Palette; 7];
+pub type Palettes = [Palette; ChartKind::COUNT];
 
 const SAVED_THEME_ID: i32 = 999;
 const DRAFT_THEME_ID: i32 = 1000;
@@ -81,7 +66,7 @@ impl Default for Appearance {
 }
 impl Appearance {
     pub fn builtin(theme: BuiltinTheme) -> Self {
-        let palettes = std::array::from_fn(|k| Palette::preset(theme, k));
+        let palettes = std::array::from_fn(|k| Palette::preset(theme, ChartKind::ALL[k]));
         Self {
             selection: Selection::Builtin(theme),
             palettes,
@@ -120,35 +105,34 @@ impl Appearance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub width: i32,
-    pub enabled: [bool; 7],
-    pub order: [usize; 7],
+    pub enabled: [bool; ChartKind::COUNT],
+    pub order: [ChartKind; ChartKind::COUNT],
     pub appearance: Appearance,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             width: 0,
-            enabled: DEFAULT_ENABLED,
-            order: [0, 1, 2, 3, 4, 5, 6],
+            enabled: CHARTS.map(|chart| chart.default_enabled),
+            order: ChartKind::ALL,
             appearance: Appearance::default(),
         }
     }
 }
 impl Config {
-    pub fn visible_kinds(&self) -> Vec<usize> {
+    pub fn visible_kinds(&self) -> Vec<ChartKind> {
         self.order
             .iter()
             .copied()
-            .filter(|&i| self.enabled[i])
-            .map(|i| CHART_KINDS[i])
+            .filter(|kind| self.enabled[kind.index()])
             .collect()
     }
 
     pub fn normalize(&mut self) {
-        let mut order = Vec::with_capacity(7);
-        // Keep valid positions, drop repeats, then append any missing charts.
-        for i in self.order.into_iter().chain(0..7) {
-            if i < 7 && !order.contains(&i) {
+        let mut order = Vec::with_capacity(ChartKind::COUNT);
+        // Drop repeats, then append any missing charts.
+        for i in self.order.into_iter().chain(ChartKind::ALL) {
+            if !order.contains(&i) {
                 order.push(i);
             }
         }
@@ -158,7 +142,7 @@ impl Config {
             self.width = 4;
         }
         if !self.enabled.iter().any(|v| *v) {
-            self.enabled = DEFAULT_ENABLED;
+            self.enabled = CHARTS.map(|chart| chart.default_enabled);
         }
     }
     pub fn load(path: &Path) -> Result<Self, glib::Error> {
@@ -171,23 +155,22 @@ impl Config {
             width: file.integer("Graphs", "width").unwrap_or(0),
             ..Self::default()
         };
-        for (i, key) in CHART_KEYS.iter().enumerate() {
-            config.enabled[i] = file.boolean("Graphs", key).unwrap_or(config.enabled[i]);
+        for chart in &CHARTS {
+            let enabled = &mut config.enabled[chart.kind.index()];
+            *enabled = file.boolean("Graphs", chart.key).unwrap_or(*enabled);
         }
         if let Ok(order) = file.string("Graphs", "order") {
-            // Leave unused slots invalid so normalize() fills them at the end.
-            config.order = [usize::MAX; 7];
-            for (slot, index) in config
-                .order
-                .iter_mut()
-                .zip(order.split(',').filter_map(|key| {
-                    CHART_KEYS
-                        .iter()
-                        .position(|candidate| *candidate == key.trim())
-                }))
+            let mut kinds = Vec::with_capacity(ChartKind::COUNT);
+            for kind in order
+                .split(',')
+                .filter_map(|key| ChartKind::from_key(key.trim()))
+                .chain(ChartKind::ALL)
             {
-                *slot = index;
+                if !kinds.contains(&kind) {
+                    kinds.push(kind);
+                }
             }
+            config.order = kinds.try_into().unwrap();
         }
         let source = file
             .string("Appearance", "custom_theme_id")
@@ -222,11 +205,11 @@ impl Config {
         file.set_string(
             "Graphs",
             "order",
-            &self.order.map(|i| CHART_KEYS[i]).join(","),
+            &self.order.map(|kind| kind.metadata().key).join(","),
         );
         file.set_integer("Graphs", "width", self.width);
-        for (key, value) in CHART_KEYS.iter().zip(self.enabled) {
-            file.set_boolean("Graphs", key, value);
+        for chart in &CHARTS {
+            file.set_boolean("Graphs", chart.key, self.enabled[chart.kind.index()]);
         }
         file.set_integer(
             "Appearance",
@@ -248,8 +231,9 @@ impl Config {
 }
 
 fn read_palettes(file: &KeyFile, prefix: &str, mut palettes: Palettes) -> Palettes {
-    for (k, palette) in palettes.iter_mut().enumerate() {
-        let group = format!("{prefix}-{k}");
+    for kind in ChartKind::ALL {
+        let palette = &mut palettes[kind.index()];
+        let group = format!("{prefix}-{}", kind.metadata().palette_id);
         for (f, key) in COLOR_KEYS.iter().enumerate() {
             if let Ok(value) = file.uint64(&group, key) {
                 if let Ok(value) = u32::try_from(value) {
@@ -264,8 +248,9 @@ fn read_palettes(file: &KeyFile, prefix: &str, mut palettes: Palettes) -> Palett
     palettes
 }
 fn write_palettes(file: &KeyFile, prefix: &str, palettes: &Palettes) {
-    for (k, palette) in palettes.iter().enumerate() {
-        let group = format!("{prefix}-{k}");
+    for kind in ChartKind::ALL {
+        let palette = &palettes[kind.index()];
+        let group = format!("{prefix}-{}", kind.metadata().palette_id);
         for (key, color) in COLOR_KEYS.iter().zip(palette.colors) {
             file.set_uint64(&group, key, color as u64);
         }
@@ -280,17 +265,17 @@ mod tests {
     fn default_charts_leave_per_qube_cpu_and_ram_available_and_keep_saved_choices() {
         let file = KeyFile::new();
         let defaults = Config::decode(&file);
-        let disabled: Vec<_> = CHART_NAMES
-            .into_iter()
+        let disabled: Vec<_> = CHARTS
+            .iter()
             .zip(defaults.enabled)
-            .filter_map(|(name, enabled)| (!enabled).then_some(name))
+            .filter_map(|(name, enabled)| (!enabled).then_some(name.name))
             .collect();
         assert_eq!(disabled, ["Per-qube CPU", "Per-qube RAM"]);
         file.set_boolean("Graphs", "qube_cpu", true);
         file.set_boolean("Graphs", "ram", false);
         let loaded = Config::decode(&file);
-        assert!(loaded.enabled[1]);
-        assert!(!loaded.enabled[2]);
+        assert!(loaded.enabled[ChartKind::QubeCpu.index()]);
+        assert!(!loaded.enabled[ChartKind::Ram.index()]);
         assert_eq!(Config::decode(&loaded.encode()), loaded);
     }
     #[test]
@@ -310,28 +295,99 @@ mod tests {
     #[test]
     fn chart_order_roundtrip_keeps_disabled_positions() {
         let config = Config {
-            order: [6, 0, 4, 2, 1, 3, 5],
+            order: [
+                ChartKind::Disk,
+                ChartKind::Cpu,
+                ChartKind::Network,
+                ChartKind::Ram,
+                ChartKind::QubeCpu,
+                ChartKind::QubeRam,
+                ChartKind::Swap,
+            ],
             enabled: [true, false, true, true, true, true, false],
             ..Config::default()
         };
         let mut loaded = Config::decode(&config.encode());
         assert_eq!(loaded, config);
-        assert_eq!(loaded.visible_kinds(), vec![0, 2, 1, 5, 3]);
-        loaded.enabled[6] = true;
-        assert_eq!(loaded.visible_kinds()[0], CHART_KINDS[6]);
+        assert_eq!(
+            loaded.visible_kinds(),
+            vec![
+                ChartKind::Cpu,
+                ChartKind::Network,
+                ChartKind::Ram,
+                ChartKind::QubeRam,
+                ChartKind::Swap
+            ]
+        );
+        loaded.enabled[ChartKind::Disk.index()] = true;
+        assert_eq!(loaded.visible_kinds()[0], ChartKind::Disk);
     }
     #[test]
     fn missing_or_invalid_chart_orders_keep_every_chart_once() {
         let file = KeyFile::new();
         assert_eq!(Config::decode(&file).order, Config::default().order);
         file.set_string("Graphs", "order", "disk,cpu,disk,unknown,ram");
-        assert_eq!(Config::decode(&file).order, [6, 0, 2, 1, 3, 4, 5]);
+        assert_eq!(
+            Config::decode(&file).order,
+            [
+                ChartKind::Disk,
+                ChartKind::Cpu,
+                ChartKind::Ram,
+                ChartKind::QubeCpu,
+                ChartKind::QubeRam,
+                ChartKind::Network,
+                ChartKind::Swap
+            ]
+        );
         let mut config = Config {
-            order: [99, 4, 4, 2, 2, 0, 99],
+            order: [
+                ChartKind::Network,
+                ChartKind::Ram,
+                ChartKind::Ram,
+                ChartKind::Cpu,
+                ChartKind::Cpu,
+                ChartKind::Network,
+                ChartKind::Ram,
+            ],
             ..Config::default()
         };
         config.normalize();
-        assert_eq!(config.order, [4, 2, 0, 1, 3, 5, 6]);
+        assert_eq!(
+            config.order,
+            [
+                ChartKind::Network,
+                ChartKind::Ram,
+                ChartKind::Cpu,
+                ChartKind::QubeCpu,
+                ChartKind::QubeRam,
+                ChartKind::Swap,
+                ChartKind::Disk
+            ]
+        );
+    }
+    #[test]
+    fn numbered_palette_groups_keep_their_existing_chart_meaning() {
+        let file = KeyFile::new();
+        // These group numbers are part of the existing settings format.
+        let groups = [
+            ("Appearance-0", ChartKind::Cpu),
+            ("Appearance-1", ChartKind::Ram),
+            ("Appearance-2", ChartKind::Network),
+            ("Appearance-3", ChartKind::Swap),
+            ("Appearance-4", ChartKind::Disk),
+            ("Appearance-5", ChartKind::QubeRam),
+            ("Appearance-6", ChartKind::QubeCpu),
+        ];
+        for (i, (group, _)) in groups.iter().enumerate() {
+            file.set_uint64(group, "series1", (i + 100) as u64);
+        }
+        let loaded = Config::decode(&file);
+        let saved = loaded.encode();
+        for (i, (group, kind)) in groups.iter().enumerate() {
+            let color = (i + 100) as u32;
+            assert_eq!(loaded.appearance.palettes[kind.index()].colors[3], color);
+            assert_eq!(saved.uint64(group, "series1").unwrap(), color as u64);
+        }
     }
     #[test]
     fn existing_settings_and_draft_source_roundtrip() {
@@ -339,11 +395,14 @@ mod tests {
         file.load_from_data("[Graphs]\nwidth=2\ninterval_ms=500\ncpu=false\nram=true\n[Appearance]\ntheme=1000\ncustom_theme_id=063e30ca-bfce-4149-98f2-b0f07f7fdaf2\n[Appearance-0]\nbackground_bottom=4260815616\n", glib::KeyFileFlags::NONE).unwrap();
         let config = Config::decode(&file);
         assert_eq!(config.width, 4);
-        assert!(!config.enabled[0]);
-        assert!(!config.enabled[1]);
-        assert!(config.enabled[2]);
+        assert!(!config.enabled[ChartKind::Cpu.index()]);
+        assert!(!config.enabled[ChartKind::QubeCpu.index()]);
+        assert!(config.enabled[ChartKind::Ram.index()]);
         assert!(!config.appearance.unsaved());
-        assert_eq!(config.appearance.palettes[0].colors[2], 0xFDF6E300);
+        assert_eq!(
+            config.appearance.palettes[ChartKind::Cpu.index()].colors[2],
+            0xFDF6E300
+        );
         assert_eq!(Config::decode(&config.encode()), config);
         let mut saved = config;
         saved
@@ -356,18 +415,18 @@ mod tests {
         let mut appearance = Appearance::builtin(BuiltinTheme::LightGradient);
         appearance.edit();
         assert!(!appearance.unsaved());
-        appearance.palettes[5].colors[3] ^= 255; // Opacity counts as an edit.
+        appearance.palettes[ChartKind::QubeRam.index()].colors[3] ^= 255; // Opacity counts as an edit.
         assert!(appearance.unsaved());
-        appearance.palettes[5].colors[3] ^= 255;
+        appearance.palettes[ChartKind::QubeRam.index()].colors[3] ^= 255;
         assert!(!appearance.unsaved());
-        appearance.palettes[0].border = 3;
+        appearance.palettes[ChartKind::Cpu.index()].border = 3;
         assert!(appearance.unsaved());
         appearance.mark_saved("063e30ca-bfce-4149-98f2-b0f07f7fdaf2".into());
         appearance.edit();
         assert!(!appearance.unsaved());
-        appearance.palettes[0].border = 0;
+        appearance.palettes[ChartKind::Cpu.index()].border = 0;
         assert!(appearance.unsaved());
-        appearance.palettes[0].border = 3;
+        appearance.palettes[ChartKind::Cpu.index()].border = 3;
         assert!(!appearance.unsaved());
     }
     #[test]
@@ -378,11 +437,11 @@ mod tests {
         };
         config.appearance.edit();
         assert!(!Config::decode(&config.encode()).appearance.unsaved());
-        config.appearance.palettes[6].border = 2;
+        config.appearance.palettes[ChartKind::QubeCpu.index()].border = 2;
         let mut loaded = Config::decode(&config.encode());
         assert_eq!(loaded, config);
         assert!(loaded.appearance.unsaved());
-        loaded.appearance.palettes[6].border = 0;
+        loaded.appearance.palettes[ChartKind::QubeCpu.index()].border = 0;
         assert!(!loaded.appearance.unsaved());
     }
 }

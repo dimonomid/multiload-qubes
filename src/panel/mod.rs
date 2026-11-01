@@ -6,6 +6,7 @@ pub(crate) mod preview;
 mod themes;
 mod updates;
 
+use crate::charts::ChartKind;
 use config::Config;
 use ffi::Host;
 use gtk::prelude::*;
@@ -93,9 +94,7 @@ impl Panel {
                     return false;
                 };
                 let graphs = p.graphs.borrow();
-                let Some(text) = graphs.tooltip(kind, rect.width(), rect.height()) else {
-                    return false;
-                };
+                let text = graphs.tooltip(kind, rect.width(), rect.height());
                 tooltip.set_text(Some(&text));
                 tooltip.set_tip_area(&rect);
                 true
@@ -232,7 +231,7 @@ fn draw_graphs(
     cr: &gtk::cairo::Context,
     width: i32,
     height: i32,
-    kinds: &[usize],
+    kinds: &[ChartKind],
     vertical: bool,
 ) {
     if let Err(error) = g.draw(cr, width, height, kinds, vertical) {
@@ -240,13 +239,13 @@ fn draw_graphs(
     }
 }
 fn chart_at(
-    kinds: &[usize],
+    kinds: &[ChartKind],
     vertical: bool,
     width: i32,
     height: i32,
     x: i32,
     y: i32,
-) -> Option<(usize, gtk::gdk::Rectangle)> {
+) -> Option<(ChartKind, gtk::gdk::Rectangle)> {
     let count = kinds.len() as i32;
     if count == 0 || x < 0 || y < 0 || x >= width || y >= height {
         return None;

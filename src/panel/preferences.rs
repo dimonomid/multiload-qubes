@@ -4,10 +4,11 @@
 //! Cancel restores the old colors. Named theme files are saved separately and
 //! are not undone by Cancel.
 use super::{
-    config::{Appearance, Selection, CHART_KINDS, CHART_NAMES},
+    config::{Appearance, Selection},
     themes::{reserved_name, valid_name, ThemeStore, BUILTINS},
     Panel,
 };
+use crate::charts::{ChartKind, CHARTS};
 use crate::palette::BuiltinTheme;
 use gtk::{prelude::*, ResponseType};
 use std::{
@@ -24,7 +25,7 @@ pub(super) struct Preferences {
     pub(super) chart_list: gtk::ListBox,
     pub(super) enable_chart: gtk::Button,
     pub(super) disable_chart: gtk::Button,
-    chart_rows: [gtk::ListBoxRow; 7],
+    chart_rows: [gtk::ListBoxRow; ChartKind::COUNT],
     pub(super) move_up: gtk::Button,
     pub(super) move_down: gtk::Button,
     pub(super) theme: gtk::ComboBoxText,
@@ -89,8 +90,8 @@ impl Preferences {
         );
         let theme = gtk::ComboBoxText::new();
         let chart = gtk::ComboBoxText::new();
-        for name in CHART_NAMES {
-            chart.append_text(name);
+        for metadata in &CHARTS {
+            chart.append_text(metadata.name);
         }
         chart.set_active(Some(0));
         let width = gtk::SpinButton::with_range(0., 512., 1.);
@@ -103,7 +104,7 @@ impl Preferences {
         }
         let chart_rows = std::array::from_fn(|i| {
             let row = gtk::ListBoxRow::new();
-            let name = label(CHART_NAMES[i]);
+            let name = label(CHARTS[i].name);
             name.set_margin_start(8);
             name.set_margin_end(8);
             name.set_margin_top(5);
@@ -112,12 +113,12 @@ impl Preferences {
             row
         });
         for i in config.order {
-            let list = if config.enabled[i] {
+            let list = if config.enabled[i.index()] {
                 &chart_list
             } else {
                 &available
             };
-            list.add(&chart_rows[i]);
+            list.add(&chart_rows[i.index()]);
         }
         chart_list.select_row(chart_list.row_at_index(0).as_ref());
         available.select_row(available.row_at_index(0).as_ref());
@@ -328,7 +329,7 @@ impl Preferences {
                     let k = p.chart_kind();
                     {
                         let mut editor = p.editor.borrow_mut();
-                        editor.palettes[k].colors[f] = packed(color.rgba());
+                        editor.palettes[k.index()].colors[f] = packed(color.rgba());
                         editor.edit();
                     }
                     p.refresh();
@@ -340,7 +341,7 @@ impl Preferences {
             if let Some(p) = weak.upgrade().filter(|p| !p.updating.get()) {
                 {
                     let mut editor = p.editor.borrow_mut();
-                    editor.palettes[p.chart_kind()].border = spin.value_as_int() as u32;
+                    editor.palettes[p.chart_kind().index()].border = spin.value_as_int() as u32;
                     editor.edit();
                 }
                 p.refresh();
@@ -351,7 +352,7 @@ impl Preferences {
             if let Some(p) = weak.upgrade().filter(|p| !p.updating.get()) {
                 {
                     let mut editor = p.editor.borrow_mut();
-                    let colors = &mut editor.palettes[p.chart_kind()].colors;
+                    let colors = &mut editor.palettes[p.chart_kind().index()].colors;
                     for value in &mut colors[1..=2] {
                         *value = (*value & !255) | if button.is_active() { 0 } else { 255 };
                     }
@@ -414,8 +415,8 @@ impl Preferences {
             self.dialog.destroy();
         }
     }
-    fn chart_kind(&self) -> usize {
-        CHART_KINDS[self.chart.active().unwrap_or(0) as usize]
+    fn chart_kind(&self) -> ChartKind {
+        ChartKind::ALL[self.chart.active().unwrap_or(0) as usize]
     }
     pub(super) fn refresh(&self) {
         if self.closed.get() {
@@ -426,24 +427,24 @@ impl Preferences {
         self.updating.set(true);
         let editor = self.editor.borrow();
         let k = self.chart_kind();
-        let palette = editor.palettes[k];
+        let palette = editor.palettes[k.index()];
         self.labels[3].set_text(match k {
-            1 => "Used",
-            2 => "Incoming",
-            4 => "Read",
-            3 | 5 | 6 => "Base line",
-            _ => "Usage",
+            ChartKind::Ram => "Used",
+            ChartKind::Network => "Incoming",
+            ChartKind::Disk => "Read",
+            ChartKind::Swap | ChartKind::QubeRam | ChartKind::QubeCpu => "Base line",
+            ChartKind::Cpu => "Usage",
         });
         self.labels[4].set_text(match k {
-            1 => "Allocated spare",
-            2 => "Outgoing",
-            4 => "Write",
+            ChartKind::Ram => "Allocated spare",
+            ChartKind::Network => "Outgoing",
+            ChartKind::Disk => "Write",
             _ => "Maximum fill",
         });
         for f in 0..7 {
             self.colors[f].set_rgba(&rgba(palette.colors[f]));
             self.colors[f].set_title(&self.labels[f].text());
-            let visible = !(f == 4 && k == 0 || f == 5 && k != 1);
+            let visible = !(f == 4 && k == ChartKind::Cpu || f == 5 && k != ChartKind::Ram);
             self.labels[f].set_visible(visible);
             self.colors[f].set_visible(visible);
         }
@@ -550,13 +551,14 @@ impl Preferences {
         });
         // Every chart keeps the same row as it moves between lists. Save enabled
         // charts first; the available list holds the remaining chart positions.
-        let mut order = Vec::with_capacity(7);
+        let mut order = Vec::with_capacity(ChartKind::COUNT);
         for list in [&self.chart_list, &self.available] {
             for row in list.children() {
                 order.push(
                     self.chart_rows
                         .iter()
                         .position(|candidate| candidate.upcast_ref::<gtk::Widget>() == &row)
+                        .map(|i| ChartKind::ALL[i])
                         .unwrap(),
                 );
             }
