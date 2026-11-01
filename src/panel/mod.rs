@@ -3,6 +3,8 @@ mod charts;
 mod config;
 mod ffi;
 mod graphs;
+#[cfg(test)]
+mod gui_tests;
 mod palette;
 mod preferences;
 pub(crate) mod preview;
