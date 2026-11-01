@@ -107,12 +107,14 @@ guest-controlled data in dom0.
 
 ## Installation
 
-First you need the RPM package either download a pre-built one, or build it
-manually as explained below.
+First you need the RPM package: either download a pre-built one from the
+[latest release](https://github.com/dimonomid/multiload-qubes/releases/latest),
+or build it manually as explained below.
 
-Optional but recommended step: before copying a pre-built RPM to dom0, verify it in a regular qube using
-[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
-Keep its original filename and place its matching `.sigstore.json` file beside it:
+If using pre-built one, optional but recommended step: before copying it to
+dom0, verify it in a regular qube using
+[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/).  Keep
+its original filename and place its matching `.sigstore.json` file beside it:
 
 ```bash
 cosign verify-blob multiload-qubes-0.1.0-1.fc37.x86_64.rpm \
@@ -124,20 +126,16 @@ cosign verify-blob multiload-qubes-0.1.0-1.fc37.x86_64.rpm \
 Adjust the filename for your release. This is a separate signature check;
 `dnf` does not verify these Sigstore signatures itself.
 
-With the `multiload-qubes.rpm` already in dom0, run in dom0 (adjust the filename):
+With the RPM package already in dom0, run in dom0 (adjust the filename as
+needed):
 
 ```bash
-sudo dnf install ~/multiload-qubes.rpm
+sudo dnf install ./multiload-qubes-0.2.0-1.fc37.x86_64.rpm
 sudo systemctl enable --now multiload-qubes-collector.service
 xfce4-panel -r
 ```
 
 Starting the collector also starts `multiload-qubes-parser.service` automatically.
-To check both services:
-
-```bash
-systemctl status multiload-qubes-collector.service multiload-qubes-parser.service
-```
 
 Then right-click on the xfce4 panel -> Panel -> Panel Preferences -> Items ->
 Add, and select **Multiload for Qubes**.
