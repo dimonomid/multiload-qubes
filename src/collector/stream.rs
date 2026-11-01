@@ -23,6 +23,13 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const RETRY_DELAY: Duration = Duration::from_secs(3);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
+const REPORTS_PER_SECOND: f64 = 4.0;
+const REPORT_BURST: f64 = 8.0;
+
 pub const METRICS_SCRIPT: &str = include_str!("../../guest/metrics.py");
 pub const NETWORK_SCRIPT: &str = include_str!("../../guest/network.py");
 
@@ -92,8 +99,8 @@ pub struct Timing {
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            stale: Duration::from_secs(5),
-            retry: Duration::from_secs(3),
+            stale: REQUEST_TIMEOUT,
+            retry: RETRY_DELAY,
         }
     }
 }
@@ -114,12 +121,12 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         self.signal_group(Signal::SIGTERM);
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + PROCESS_EXIT_GRACE;
         loop {
             match self.0.try_wait() {
                 Ok(Some(_)) => return,
                 _ if Instant::now() >= deadline => break,
-                _ => thread::sleep(Duration::from_millis(20)),
+                _ => thread::sleep(POLL_INTERVAL),
             }
         }
         self.signal_group(Signal::SIGKILL);
@@ -263,7 +270,7 @@ impl Reader {
                         );
                     }
                     while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(20));
+                        thread::sleep(POLL_INTERVAL);
                     }
                 }
                 worker_connection
@@ -337,9 +344,9 @@ fn session(
         let mut chunk = [0; 4096];
         let mut pending: Option<(String, Instant)> = None;
         let mut budget_time = Instant::now();
-        // Allow a short burst of buffered lines, but reject a stream that keeps
-        // sending more than four samples per second. Guest output is untrusted.
-        let mut budget = 8.0_f64;
+        // Allow a short burst of buffered replies, but bound sustained traffic.
+        // Guest output is untrusted even when replies were requested.
+        let mut budget = REPORT_BURST;
         while !stop.load(Ordering::Relaxed) {
             captured
                 .drain(&mut stderr)
@@ -362,13 +369,14 @@ fn session(
                 Ok(0) => return Err("guest stream closed".into()),
                 Ok(n) => {
                     buffer.extend_from_slice(&chunk[..n]);
-                    if buffer.len() > 8192 {
+                    if buffer.len() > MAX_REPORT_BYTES {
                         return Err("oversized guest stream".into());
                     }
                     while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                         let now = Instant::now();
-                        budget = (budget + now.duration_since(budget_time).as_secs_f64() * 4.0)
-                            .min(8.0)
+                        budget = (budget
+                            + now.duration_since(budget_time).as_secs_f64() * REPORTS_PER_SECOND)
+                            .min(REPORT_BURST)
                             - 1.0;
                         budget_time = now;
                         if budget < 0.0 {
@@ -392,7 +400,7 @@ fn session(
                     if e.kind() == io::ErrorKind::WouldBlock
                         || e.kind() == io::ErrorKind::Interrupted =>
                 {
-                    thread::sleep(Duration::from_millis(20))
+                    thread::sleep(POLL_INTERVAL)
                 }
                 Err(e) => return Err(e.to_string()),
             }
@@ -763,7 +771,10 @@ mod tests {
     #[test]
     fn rejects_unsolicited_and_oversized_output() {
         let error = session_error(
-            "print('x'*10000,flush=True)\ntime.sleep(30)",
+            &format!(
+                "print('x'*{},flush=True)\ntime.sleep(30)",
+                MAX_REPORT_BYTES + 1
+            ),
             Duration::from_secs(2),
         );
         assert!(error.contains("oversized guest stream"), "{error}");

@@ -9,7 +9,7 @@ pub mod xen;
 
 use crate::metrics::{
     eligible, handoff, protocol, publish, ram_snapshot, shutdown, snapshot, swap_snapshot, Domain,
-    Host, Identity,
+    Host, Identity, MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
 };
 use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
 use protocol::Kind;
@@ -109,6 +109,9 @@ impl CpuTracker {
     }
 }
 
+// Retired workers count too, so reconnects cannot exceed the transport budget.
+const MAX_NUM_REPORTER_WORKERS: usize = MAX_NUM_QUBE_REPORTERS + NUM_NETWORK_REPORTERS;
+
 /// Owns only transports; measurement fields are parsed by the other service.
 struct Reporters {
     readers: BTreeMap<String, (Identity, Reader)>,
@@ -124,14 +127,14 @@ impl Reporters {
             retired: Vec::new(),
             directory,
             factory: |identity, kind| CommandSpec::qube(&identity.name, kind),
-            limit: 129,
+            limit: MAX_NUM_REPORTER_WORKERS,
         }
     }
     fn sync(&mut self, host: &Host, memory: bool, network: Option<&str>) {
         let mut wanted = BTreeMap::new();
         let mut memory_count = 0;
         for identity in eligible(host).into_values() {
-            if memory && memory_count < 128 {
+            if memory && memory_count < MAX_NUM_QUBE_REPORTERS {
                 memory_count += 1;
                 wanted.insert(
                     format!("memory-{}", identity.id),

@@ -15,6 +15,8 @@ use std::collections::VecDeque;
 
 use crate::Snapshot;
 
+const HISTORY_LENGTH: usize = 2048;
+
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
     tooltips: [String; ChartKind::COUNT],
@@ -79,7 +81,7 @@ impl Graphs {
     pub(crate) fn push_sample(&mut self, sample: Option<Snapshot>, demo: bool) {
         self.tooltips = tooltips(sample.as_ref(), demo);
         self.history.push_back(sample);
-        while self.history.len() > 2048 {
+        while self.history.len() > HISTORY_LENGTH {
             self.history.pop_front();
         }
     }
@@ -568,10 +570,10 @@ mod tests {
     #[test]
     fn bounded_history_and_missing_data() {
         let mut g = Graphs::new();
-        for _ in 0..3000 {
+        for _ in 0..HISTORY_LENGTH + 1 {
             g.update(true);
         }
-        assert_eq!(g.history.len(), 2048);
+        assert_eq!(g.history.len(), HISTORY_LENGTH);
         assert!(g.tooltips.iter().all(|t| t.as_str().contains("DEMO")));
     }
 }

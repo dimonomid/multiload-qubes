@@ -156,7 +156,7 @@ impl Parser {
             || !handoff::fresh(
                 frame.timestamp,
                 now,
-                (pending.base.period * 4.0).max(handoff::STALE_SECONDS),
+                multiload_qubes_snapshot::max_sample_age(pending.base.period),
             )
             || frame.payload.len() > handoff::MAX_REPORT_BYTES
         {
@@ -235,8 +235,8 @@ pub fn run(options: Options) -> Result<(), String> {
             match PendingTick::load(&options.input, now) {
                 Ok(next) => {
                     last_error = None;
-                    fresh_until =
-                        next.base.timestamp + (next.base.period * 4.0).max(handoff::STALE_SECONDS);
+                    fresh_until = next.base.timestamp
+                        + multiload_qubes_snapshot::max_sample_age(next.base.period);
                     let same_pending = pending
                         .as_ref()
                         .is_some_and(|p| p.frame.tick.tick_id == next.frame.tick.tick_id);

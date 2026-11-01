@@ -9,7 +9,6 @@ use std::path::Path;
 pub const MAX_REPORT_BYTES: usize = 8192;
 pub const MAX_RAW_BYTES: usize = 64 * 1024;
 pub const MAX_HOST_BYTES: usize = 1024 * 1024;
-pub const STALE_SECONDS: f64 = 5.0;
 
 pub const TICK_WAIT_SECONDS: f64 = 0.1;
 

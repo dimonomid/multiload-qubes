@@ -5,7 +5,15 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_WIRE_BYTES: usize = 96 * 1024;
-pub const MAX_DOMAIN_ENTRIES: usize = 129; // 128 guest readers plus dom0.
+/// General qube reporters, shared with the snapshot entry limit below.
+pub const MAX_NUM_QUBE_REPORTERS: usize = 128;
+// Domain snapshots include dom0; the separate network reporter adds no domain entry.
+pub const MAX_DOMAIN_ENTRIES: usize = MAX_NUM_QUBE_REPORTERS + 1;
+
+/// Maximum age in seconds: allow missed ticks, but reject old measurements.
+pub fn max_sample_age(period: f64) -> f64 {
+    (period * 4.0).max(5.0)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DomainUsage {
@@ -470,7 +478,7 @@ impl Snapshot {
         let snapshot = Self::decode(text)?;
         if !now.is_finite()
             || snapshot.timestamp > now + 5.0
-            || now - snapshot.timestamp > (snapshot.period * 4.0).max(5.0)
+            || now - snapshot.timestamp > max_sample_age(snapshot.period)
         {
             return Err(SnapshotError::Stale);
         }

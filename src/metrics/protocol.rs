@@ -2,6 +2,7 @@
 //!
 //! Guest output is not trusted. RAM and swap are in KiB; network counters are
 //! in bytes. Network rates use the guest's monotonic clock, not arrival times.
+use super::handoff::MAX_REPORT_BYTES;
 use std::collections::BTreeMap;
 
 pub fn number(value: &str) -> Result<u64, String> {
@@ -110,7 +111,7 @@ impl Tracker {
     /// Checks one line. `Ok(None)` is a valid report with no rate yet, such as
     /// the first network sample or a sample after a counter reset.
     pub fn update(&mut self, line: &[u8]) -> Result<Option<Reading>, String> {
-        if line.len() > 8192 || !line.is_ascii() {
+        if line.len() > MAX_REPORT_BYTES || !line.is_ascii() {
             return Err("invalid guest frame".into());
         }
         let text = std::str::from_utf8(line).map_err(|_| "invalid encoding")?;

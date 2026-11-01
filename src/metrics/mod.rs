@@ -3,6 +3,9 @@
 pub mod handoff;
 pub mod protocol;
 pub mod shutdown;
+pub use multiload_qubes_snapshot::MAX_NUM_QUBE_REPORTERS;
+// Network collection has its own connection, separate from a qube's RAM/swap reporter.
+pub const NUM_NETWORK_REPORTERS: usize = 1;
 use multiload_qubes_snapshot::{unix_time_now, DomainUsage, DomainUsageSnapshot, Snapshot};
 use protocol::Reading;
 use std::collections::{BTreeMap, BTreeSet};
