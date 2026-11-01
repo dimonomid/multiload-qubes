@@ -608,6 +608,9 @@ dependencies = [
 [[package]]
 name = "multiload-qubes-snapshot"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "nix"

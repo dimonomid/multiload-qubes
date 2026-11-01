@@ -5,3 +5,6 @@ edition = "2021"
 license = "GPL-2.0-or-later"
 publish = false
 description = "Shared MQ6 snapshot contract for Multiload for Qubes"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

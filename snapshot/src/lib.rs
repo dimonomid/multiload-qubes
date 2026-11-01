@@ -15,7 +15,7 @@ pub fn max_sample_age(period: f64) -> f64 {
     (period * 4.0).max(5.0)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainUsage {
     /// Domain incarnation key: a restarted qube starts a new line segment.
     pub id: String,
@@ -32,7 +32,7 @@ impl DomainUsage {
 
 /// Reports may be missing. Keep the expected count separate from the entries
 /// so the panel can show partial coverage rather than treating missing qubes as idle.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainUsageSnapshot {
     /// Number of running, eligible guests plus dom0, including missing reports.
     pub expected: u32,
@@ -46,9 +46,40 @@ impl DomainUsageSnapshot {
             .filter_map(DomainUsage::percent)
             .reduce(f64::max)
     }
+    fn validate(&self, require_nonzero_total: bool) -> Result<(), SnapshotError> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
+        if self.entries.len() > MAX_DOMAIN_ENTRIES || self.entries.len() > self.expected as usize {
+            return Err(SnapshotError::InvalidField("domain usage coverage"));
+        }
+        for entry in &self.entries {
+            if entry.id.is_empty()
+                || entry.id.len() > 96
+                || !entry
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b))
+                || entry.name.is_empty()
+                || entry.name.len() > 31
+                || !entry.name.as_bytes()[0].is_ascii_alphabetic()
+                || !entry
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                || (require_nonzero_total && entry.total == 0)
+                || entry.used > entry.total
+                || entry.total > i64::MAX as u64
+                || !ids.insert(&entry.id)
+                || !names.insert(&entry.name)
+            {
+                return Err(SnapshotError::InvalidField("domain usage entry"));
+            }
+        }
+        Ok(())
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainCpuSnapshot {
     /// Sampling window in nanoseconds; entries use scheduled CPU ns / vCPU budget ns.
     pub window_ns: u64,
@@ -61,6 +92,20 @@ impl DomainCpuSnapshot {
     }
     pub fn host_percent(&self, entry: &DomainUsage) -> f64 {
         entry.used as f64 / self.window_ns as f64 / self.host_cpus as f64 * 100.0
+    }
+    pub fn validate(&self) -> Result<(), SnapshotError> {
+        if self.window_ns == 0
+            || self.window_ns > 60_000_000_000
+            || self.host_cpus == 0
+            || self.usage.entries.iter().any(|e| {
+                e.total == 0 || e.total % self.window_ns != 0 || e.total / self.window_ns > 65536
+            })
+        {
+            return Err(SnapshotError::InvalidField(
+                "per-domain CPU window or vCPUs",
+            ));
+        }
+        self.usage.validate(true)
     }
 }
 
@@ -77,7 +122,7 @@ pub fn disk_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-!.".contains(&b))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiskSnapshot {
     pub devices: Vec<String>,
     /// Read/write bytes per second. None means warming up or no selected devices.
@@ -211,21 +256,57 @@ fn decode_domains(
     }))
 }
 
+/// Check the fields shared by a host sample and its final snapshot.
+pub fn validate_sample_header(
+    timestamp: f64,
+    period: f64,
+    cpu: Option<f64>,
+) -> Result<(), SnapshotError> {
+    if !timestamp.is_finite() {
+        return Err(SnapshotError::InvalidField("timestamp"));
+    }
+    if !period.is_finite() || !(0.1..=60.0).contains(&period) {
+        return Err(SnapshotError::InvalidField("period (seconds)"));
+    }
+    if cpu.is_some_and(|v| !v.is_finite() || !(0.0..=100.0).contains(&v)) {
+        return Err(SnapshotError::InvalidField("CPU percent"));
+    }
+    Ok(())
+}
+
+/// Check age without replacing the measurement timestamp with the reader's clock.
+pub fn check_freshness(timestamp: f64, period: f64, now: f64) -> Result<(), SnapshotError> {
+    validate_sample_header(timestamp, period, None)?;
+    if !now.is_finite() || timestamp > now + 5.0 || now - timestamp > max_sample_age(period) {
+        return Err(SnapshotError::Stale);
+    }
+    Ok(())
+}
+
+impl DiskSnapshot {
+    pub fn validate(&self) -> Result<(), SnapshotError> {
+        let names: std::collections::BTreeSet<_> = self.devices.iter().collect();
+        if self.devices.len() > MAX_DISK_DEVICES
+            || names.len() != self.devices.len()
+            || self.devices.iter().any(|name| !disk_name(name))
+            || self.rates.is_some_and(|(read, write)| {
+                self.devices.is_empty()
+                    || !read.is_finite()
+                    || !write.is_finite()
+                    || !(0.0..=1e15).contains(&read)
+                    || !(0.0..=1e15).contains(&write)
+            })
+        {
+            return Err(SnapshotError::InvalidField("disk activity"));
+        }
+        Ok(())
+    }
+}
+
 impl Snapshot {
     /// Validate the data contract without consulting the clock.
     pub fn validate(&self) -> Result<(), SnapshotError> {
-        if !self.timestamp.is_finite() {
-            return Err(SnapshotError::InvalidField("timestamp"));
-        }
-        if !self.period.is_finite() || !(0.1..=60.0).contains(&self.period) {
-            return Err(SnapshotError::InvalidField("period (seconds)"));
-        }
-        if self
-            .cpu
-            .is_some_and(|v| !v.is_finite() || !(0.0..=100.0).contains(&v))
-        {
-            return Err(SnapshotError::InvalidField("CPU percent"));
-        }
+        validate_sample_header(self.timestamp, self.period, self.cpu)?;
         if let Some((rx, tx)) = self.network {
             if !rx.is_finite()
                 || !tx.is_finite()
@@ -236,70 +317,16 @@ impl Snapshot {
             }
         }
         if let Some(disk) = &self.disk {
-            let names: std::collections::BTreeSet<_> = disk.devices.iter().collect();
-            if disk.devices.len() > MAX_DISK_DEVICES
-                || names.len() != disk.devices.len()
-                || disk.devices.iter().any(|name| !disk_name(name))
-                || disk.rates.is_some_and(|(read, write)| {
-                    disk.devices.is_empty()
-                        || !read.is_finite()
-                        || !write.is_finite()
-                        || !(0.0..=1e15).contains(&read)
-                        || !(0.0..=1e15).contains(&write)
-                })
-            {
-                return Err(SnapshotError::InvalidField("disk activity"));
-            }
+            disk.validate()?;
         }
         if let Some(cpu) = &self.qube_cpu {
-            if cpu.window_ns == 0
-                || cpu.window_ns > 60_000_000_000
-                || cpu.host_cpus == 0
-                || cpu.usage.entries.iter().any(|e| {
-                    e.total == 0 || e.total % cpu.window_ns != 0 || e.total / cpu.window_ns > 65536
-                })
-            {
-                return Err(SnapshotError::InvalidField(
-                    "per-domain CPU window or vCPUs",
-                ));
-            }
+            cpu.validate()?;
         }
-        for (usage, is_ram) in [
-            (self.swap.as_ref(), false),
-            (self.qube_ram.as_ref(), true),
-            (self.qube_cpu.as_ref().map(|c| &c.usage), true),
-        ] {
-            let Some(swap) = usage else { continue };
-            let mut ids = std::collections::BTreeSet::new();
-            let mut names = std::collections::BTreeSet::new();
-            if swap.entries.len() > MAX_DOMAIN_ENTRIES
-                || swap.entries.len() > swap.expected as usize
-            {
-                return Err(SnapshotError::InvalidField("domain usage coverage"));
-            }
-            for entry in &swap.entries {
-                if entry.id.is_empty()
-                    || entry.id.len() > 96
-                    || !entry
-                        .id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"/_-".contains(&b))
-                    || entry.name.is_empty()
-                    || entry.name.len() > 31
-                    || !entry.name.as_bytes()[0].is_ascii_alphabetic()
-                    || !entry
-                        .name
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                    || (is_ram && entry.total == 0)
-                    || entry.used > entry.total
-                    || entry.total > i64::MAX as u64
-                    || !ids.insert(&entry.id)
-                    || !names.insert(&entry.name)
-                {
-                    return Err(SnapshotError::InvalidField("domain usage entry"));
-                }
-            }
+        if let Some(swap) = &self.swap {
+            swap.validate(false)?;
+        }
+        if let Some(ram) = &self.qube_ram {
+            ram.validate(true)?;
         }
         // Ordered checks make every subtraction safe even for hostile u64 values.
         if self.total == 0
@@ -428,12 +455,7 @@ impl Snapshot {
     /// tolerance, and max(5 seconds, four collection intervals) of age tolerance.
     pub fn decode_fresh_at(text: &str, now: f64) -> Result<Self, SnapshotError> {
         let snapshot = Self::decode(text)?;
-        if !now.is_finite()
-            || snapshot.timestamp > now + 5.0
-            || now - snapshot.timestamp > max_sample_age(snapshot.period)
-        {
-            return Err(SnapshotError::Stale);
-        }
+        check_freshness(snapshot.timestamp, snapshot.period, now)?;
         Ok(snapshot)
     }
 }

@@ -2,7 +2,7 @@
 //! when its accepted requests finish or its 100 ms deadline expires.
 use crate::metrics::handoff::{self, HostFrame, RawFrame};
 use crate::metrics::protocol::{Kind, Reading, Tracker};
-use crate::metrics::{eligible, publish, ram_snapshot, shutdown, snapshot, swap_snapshot};
+use crate::metrics::{eligible, publish, shutdown};
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags};
@@ -26,7 +26,6 @@ struct Parser {
 
 struct PendingTick {
     frame: HostFrame,
-    base: Snapshot,
     // None is a terminal reply with no valid measurement (including network warmup).
     replies: BTreeMap<String, Option<Reading>>,
 }
@@ -37,13 +36,14 @@ impl PendingTick {
             handoff::MAX_HOST_BYTES,
         )?)
         .map_err(|e| e.to_string())?;
-        let base = Snapshot::decode_fresh_at(&frame.metrics, now).map_err(|e| e.to_string())?;
+        frame.sample.validate()?;
+        multiload_qubes_snapshot::check_freshness(frame.sample.timestamp, frame.sample.period, now)
+            .map_err(|e| e.to_string())?;
         if !frame.tick.deadline.is_finite() {
             return Err("invalid tick deadline".into());
         }
         Ok(Self {
             frame,
-            base,
             replies: BTreeMap::new(),
         })
     }
@@ -51,7 +51,7 @@ impl PendingTick {
         self.replies.len() == self.frame.tick.expected.len()
     }
     fn snapshot(&self) -> Result<Snapshot, String> {
-        let memory: BTreeMap<_, _> = eligible(&self.frame.host)
+        let memory: BTreeMap<_, _> = eligible(&self.frame.sample.host)
             .keys()
             .filter_map(|id| {
                 self.replies
@@ -61,33 +61,8 @@ impl PendingTick {
                     .map(|r| (*id, r))
             })
             .collect();
-        let usage = memory
-            .iter()
-            .filter_map(|(id, r)| match r {
-                Reading::Memory { used, .. } => Some((*id, *used)),
-                _ => None,
-            })
-            .collect();
         let network = self.replies.get("network").copied().flatten();
-        let mut combined = snapshot(
-            &self.frame.host,
-            self.frame.dom0_ram.1,
-            &usage,
-            self.base.cpu,
-            network,
-            self.base.period,
-        )?;
-        // A live parser must not make stale host data look fresh.
-        combined.timestamp = self.base.timestamp;
-        combined.qube_cpu = self.base.qube_cpu.clone();
-        combined.disk = self.base.disk.clone();
-        combined.qube_ram = Some(ram_snapshot(&self.frame.host, self.frame.dom0_ram, &memory));
-        combined.swap = Some(swap_snapshot(
-            &self.frame.host,
-            self.frame.dom0_swap,
-            &memory,
-        ));
-        Ok(combined)
+        self.frame.sample.snapshot(&memory, network)
     }
 }
 
@@ -156,7 +131,7 @@ impl Parser {
             || !handoff::fresh(
                 frame.timestamp,
                 now,
-                multiload_qubes_snapshot::max_sample_age(pending.base.period),
+                multiload_qubes_snapshot::max_sample_age(pending.frame.sample.period),
             )
             || frame.payload.len() > handoff::MAX_REPORT_BYTES
         {
@@ -185,7 +160,7 @@ impl Parser {
         }
     }
     fn prune(&mut self, frame: &HostFrame) {
-        let active = eligible(&frame.host);
+        let active = eligible(&frame.sample.host);
         self.reports.retain(|file, report| {
             if file == "network" {
                 frame.network_identity.as_ref() == Some(&report.identity)
@@ -243,8 +218,8 @@ pub fn run(options: Options) -> Result<(), String> {
             match PendingTick::load(&options.input, now) {
                 Ok(next) => {
                     last_error = None;
-                    fresh_until = next.base.timestamp
-                        + multiload_qubes_snapshot::max_sample_age(next.base.period);
+                    fresh_until = next.frame.sample.timestamp
+                        + multiload_qubes_snapshot::max_sample_age(next.frame.sample.period);
                     let same_pending = pending
                         .as_ref()
                         .is_some_and(|p| p.frame.tick.tick_id == next.frame.tick.tick_id);

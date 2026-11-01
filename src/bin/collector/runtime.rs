@@ -5,8 +5,8 @@
 use super::{disk, stream, xen};
 
 use crate::metrics::{
-    eligible, handoff, protocol, publish, ram_snapshot, shutdown, snapshot, swap_snapshot, Host,
-    Identity, MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
+    eligible, handoff, protocol, publish, shutdown, Host, HostSample, Identity,
+    MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
 };
 use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
 use protocol::Kind;
@@ -225,22 +225,17 @@ pub fn run(options: Options) -> Result<(), String> {
     if options.once {
         let host = xen.sample()?;
         let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-        let usage = protocol::dom0_memory(&meminfo)?;
-        let mut data = snapshot(
-            &host,
-            usage.1,
-            &BTreeMap::new(),
-            None,
-            None,
-            options.interval,
-        )?;
-        data.swap = Some(swap_snapshot(
-            &host,
-            protocol::dom0_swap(&meminfo)?,
-            &BTreeMap::new(),
-        ));
-        data.qube_ram = Some(ram_snapshot(&host, usage, &BTreeMap::new()));
-        data.disk = disk.sample(start.elapsed());
+        let sample = HostSample {
+            timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
+            period: options.interval,
+            host,
+            cpu: None,
+            qube_cpu: None,
+            disk: disk.sample(start.elapsed()),
+            dom0_ram: protocol::dom0_memory(&meminfo)?,
+            dom0_swap: protocol::dom0_swap(&meminfo)?,
+        };
+        let data = sample.snapshot(&BTreeMap::new(), None)?;
         print!("{}", data.encode().map_err(|e| e.to_string())?);
         return Ok(());
     }
@@ -278,42 +273,44 @@ pub fn run(options: Options) -> Result<(), String> {
             let deadline = multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?
                 + handoff::TICK_WAIT_SECONDS;
             let expected = reporters.request(&tick_id);
-            let readings = BTreeMap::new();
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-            let dom0 = protocol::dom0_memory(&meminfo)?;
-            let mut data = snapshot(&host, dom0.1, &readings, cpu_usage, None, options.interval)?;
-            data.swap = Some(swap_snapshot(
-                &host,
-                protocol::dom0_swap(&meminfo)?,
-                &BTreeMap::new(),
-            ));
-            data.qube_cpu = cpu.per_domain.clone();
-            data.qube_ram = Some(ram_snapshot(&host, dom0, &BTreeMap::new()));
-            data.disk = disk.sample(start.elapsed());
-            let metrics = data.encode().map_err(|e| e.to_string())?;
+            let network_identity = eligible(&host)
+                .values()
+                .find(|key| options.network.as_deref() == Some(key.name.as_str()))
+                .map(|key| format!("{}/{}", key.id, key.uuid));
+            let sample = HostSample {
+                timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
+                period: options.interval,
+                host,
+                cpu: cpu_usage,
+                qube_cpu: cpu.per_domain.clone(),
+                disk: disk.sample(start.elapsed()),
+                dom0_ram: protocol::dom0_memory(&meminfo)?,
+                dom0_swap: protocol::dom0_swap(&meminfo)?,
+            };
             let frame = handoff::HostFrame {
                 tick: handoff::Tick {
                     tick_id,
                     deadline,
                     expected,
                 },
-                host: host.clone(),
-                metrics,
+                sample,
                 memory_enabled: options.memory,
-                network_identity: eligible(&host)
-                    .values()
-                    .find(|key| options.network.as_deref() == Some(key.name.as_str()))
-                    .map(|key| format!("{}/{}", key.id, key.uuid)),
-                dom0_ram: dom0,
-                dom0_swap: protocol::dom0_swap(&meminfo)?,
+                network_identity,
             };
+            // Keep the host-only diagnostic file separate from the parser input.
+            let metrics = frame
+                .sample
+                .snapshot(&BTreeMap::new(), None)?
+                .encode()
+                .map_err(|e| e.to_string())?;
             // Publish context first. Raw reports from a previous incarnation are
             // rejected by identity even if an old file remains in the directory.
             publish(
                 &parent.join("host.json"),
                 &serde_json::to_string(&frame).map_err(|e| e.to_string())?,
             )?;
-            publish(&options.output, &frame.metrics)
+            publish(&options.output, &metrics)
         })();
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
@@ -329,7 +326,7 @@ pub fn run(options: Options) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::Domain;
+    use crate::metrics::{ram_snapshot, swap_snapshot, Domain};
     fn domain(id: u32) -> Domain {
         Domain {
             id,
@@ -429,16 +426,27 @@ mod tests {
     fn aggregation_unknown_and_ballooning() {
         let h = host();
         let mut readings = BTreeMap::new();
-        readings.insert(1, 1500);
-        let data = snapshot(
-            &h,
-            400,
-            &readings,
-            Some(50.0),
-            Some(Reading::Network(1234.5, 678.25)),
-            1.0,
-        )
-        .unwrap();
+        readings.insert(
+            1,
+            Reading::Memory {
+                total: 2000,
+                used: 1500,
+                swap: None,
+            },
+        );
+        let mut sample = HostSample {
+            timestamp: 1000.0,
+            period: 1.0,
+            host: h,
+            cpu: Some(50.0),
+            qube_cpu: None,
+            disk: None,
+            dom0_ram: (2000, 400),
+            dom0_swap: (0, 0),
+        };
+        let data = sample
+            .snapshot(&readings, Some(Reading::Network(1234.5, 678.25)))
+            .unwrap();
         assert_eq!(data.cpu, Some(50.0));
         assert_eq!(data.total, 4000);
         assert_eq!(data.allocated, 3000);
@@ -447,9 +455,23 @@ mod tests {
         assert_eq!(data.overhead, 100);
         assert_eq!(data.period, 1.0);
         assert_eq!(data.network, Some((1234.5, 678.25)));
-        let mut invalid = h;
-        invalid.total = 10;
-        assert!(snapshot(&invalid, 0, &readings, None, None, 1.0).is_err());
+        assert_eq!(data.timestamp, sample.timestamp);
+        sample.validate().unwrap();
+        let decoded: HostSample =
+            serde_json::from_slice(&serde_json::to_vec(&sample).unwrap()).unwrap();
+        assert_eq!(
+            decoded
+                .snapshot(&readings, Some(Reading::Network(1234.5, 678.25)))
+                .unwrap(),
+            data
+        );
+        let host_only = decoded.snapshot(&BTreeMap::new(), None).unwrap();
+        assert_eq!(host_only.timestamp, sample.timestamp);
+        assert_eq!(host_only.used, 400);
+        assert_eq!(host_only.unknown, 2000);
+        sample.host.total = 10;
+        assert!(sample.validate().is_err());
+        assert!(sample.snapshot(&readings, None).is_err());
     }
     #[test]
     fn lifecycle_filtering_identity_and_names() {

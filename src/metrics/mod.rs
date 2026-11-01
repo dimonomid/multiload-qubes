@@ -6,7 +6,9 @@ pub mod shutdown;
 pub use multiload_qubes_snapshot::MAX_NUM_QUBE_REPORTERS;
 // Network collection has its own connection, separate from a qube's RAM/swap reporter.
 pub const NUM_NETWORK_REPORTERS: usize = 1;
-use multiload_qubes_snapshot::{unix_time_now, DomainUsage, DomainUsageSnapshot, Snapshot};
+use multiload_qubes_snapshot::{
+    DiskSnapshot, DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot, Snapshot,
+};
 use protocol::Reading;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -33,6 +35,102 @@ pub struct Host {
     pub free: u64,
     pub cpus: u32,
     pub domains: Vec<Domain>,
+}
+
+/// Host measurements from one tick, before qube replies are combined with them.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct HostSample {
+    pub timestamp: f64,
+    pub period: f64,
+    pub host: Host,
+    pub cpu: Option<f64>,
+    pub qube_cpu: Option<DomainCpuSnapshot>,
+    pub disk: Option<DiskSnapshot>,
+    /// Total and used KiB from dom0's /proc/meminfo.
+    pub dom0_ram: (u64, u64),
+    pub dom0_swap: (u64, u64),
+}
+impl HostSample {
+    pub fn validate(&self) -> Result<(), String> {
+        multiload_qubes_snapshot::validate_sample_header(self.timestamp, self.period, self.cpu)
+            .map_err(|e| e.to_string())?;
+        if let Some(cpu) = &self.qube_cpu {
+            cpu.validate().map_err(|e| e.to_string())?;
+        }
+        if let Some(disk) = &self.disk {
+            disk.validate().map_err(|e| e.to_string())?;
+        }
+        if self.dom0_ram.0 == 0
+            || [self.dom0_ram, self.dom0_swap]
+                .into_iter()
+                .any(|(total, used)| used > total || total > i64::MAX as u64)
+        {
+            return Err("invalid dom0 memory usage".into());
+        }
+        let allocated = self.host.domains.iter().try_fold(0_u64, |sum, domain| {
+            sum.checked_add(domain.allocated)
+                .ok_or("allocation overflow")
+        })?;
+        if self.host.total == 0 || allocated > self.host.total {
+            return Err("invalid host RAM allocation".into());
+        }
+        Ok(())
+    }
+    pub fn snapshot(
+        &self,
+        readings: &BTreeMap<u32, Reading>,
+        network: Option<Reading>,
+    ) -> Result<Snapshot, String> {
+        let host = &self.host;
+        let (mut allocated, mut used, mut unknown) = (0_u64, 0_u64, 0_u64);
+        for d in &host.domains {
+            allocated = allocated
+                .checked_add(d.allocated)
+                .ok_or("allocation overflow")?;
+            let usage = if d.id == 0 {
+                Some(self.dom0_ram.1)
+            } else {
+                match readings.get(&d.id) {
+                    Some(Reading::Memory { used, .. }) => Some(*used),
+                    _ => None,
+                }
+            };
+            // Guest reports and Xen allocation are sampled separately. Ballooning
+            // can make a report larger than the current allocation.
+            if let Some(n) = usage {
+                used = used
+                    .checked_add(n.min(d.allocated))
+                    .ok_or("usage overflow")?;
+            } else {
+                unknown = unknown
+                    .checked_add(d.allocated)
+                    .ok_or("unknown allocation overflow")?;
+            }
+        }
+        let snapshot = Snapshot {
+            timestamp: self.timestamp,
+            cpu: self.cpu,
+            total: host.total,
+            allocated,
+            used,
+            unknown,
+            overhead: host
+                .total
+                .saturating_sub(allocated)
+                .saturating_sub(host.free),
+            period: self.period,
+            swap: Some(swap_snapshot(host, self.dom0_swap, readings)),
+            qube_ram: Some(ram_snapshot(host, self.dom0_ram, readings)),
+            qube_cpu: self.qube_cpu.clone(),
+            disk: self.disk.clone(),
+            network: match network {
+                Some(Reading::Network(rx, tx)) => Some((rx, tx)),
+                _ => None,
+            },
+        };
+        snapshot.validate().map_err(|e| e.to_string())?;
+        Ok(snapshot)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,61 +213,6 @@ pub fn ram_snapshot(
         Reading::Memory { total, used, .. } => Some((total, used)),
         _ => None,
     })
-}
-
-pub fn snapshot(
-    host: &Host,
-    dom0: u64,
-    readings: &BTreeMap<u32, u64>,
-    cpu: Option<f64>,
-    network: Option<Reading>,
-    period: f64,
-) -> Result<Snapshot, String> {
-    let (mut allocated, mut used, mut unknown) = (0_u64, 0_u64, 0_u64);
-    for d in &host.domains {
-        allocated = allocated
-            .checked_add(d.allocated)
-            .ok_or("allocation overflow")?;
-        let usage = if d.id == 0 {
-            Some(dom0)
-        } else {
-            readings.get(&d.id).copied()
-        };
-        // Guest reports and Xen allocation are sampled separately. Ballooning
-        // can make a report larger than the current allocation.
-        if let Some(n) = usage {
-            used = used
-                .checked_add(n.min(d.allocated))
-                .ok_or("usage overflow")?;
-        } else {
-            unknown = unknown
-                .checked_add(d.allocated)
-                .ok_or("unknown allocation overflow")?;
-        }
-    }
-    let snapshot = Snapshot {
-        timestamp: unix_time_now().map_err(|e| e.to_string())?,
-        cpu,
-        total: host.total,
-        allocated,
-        used,
-        unknown,
-        overhead: host
-            .total
-            .saturating_sub(allocated)
-            .saturating_sub(host.free),
-        period,
-        swap: None,
-        qube_ram: None,
-        qube_cpu: None,
-        disk: None,
-        network: match network {
-            Some(Reading::Network(rx, tx)) => Some((rx, tx)),
-            _ => None,
-        },
-    };
-    snapshot.validate().map_err(|e| e.to_string())?;
-    Ok(snapshot)
 }
 
 pub fn publish(path: &Path, text: &str) -> Result<(), String> {

@@ -1,5 +1,5 @@
 //! Root-owned files passed to the parser. Guest bytes never choose a path or identity.
-use super::Host;
+use super::HostSample;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -23,12 +23,9 @@ pub struct Tick {
 #[derive(Serialize, Deserialize)]
 pub struct HostFrame {
     pub tick: Tick,
-    pub host: Host,
-    pub metrics: String,
+    pub sample: HostSample,
     pub memory_enabled: bool,
     pub network_identity: Option<String>,
-    pub dom0_ram: (u64, u64),
-    pub dom0_swap: (u64, u64),
 }
 
 #[derive(Serialize, Deserialize)]
