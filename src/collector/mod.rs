@@ -269,14 +269,17 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut sequence = 0_u64;
     while !shutdown.requested() {
         let tick_started = Instant::now();
-        let deadline = multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?
-            + handoff::TICK_WAIT_SECONDS;
         sequence += 1;
         let tick_id = format!("{instance}/{sequence}");
         let result = (|| {
             let host = xen.sample()?;
             let cpu_usage = cpu.update(&host, start.elapsed());
             reporters.sync(&host, options.memory, options.network.as_deref());
+            // Start the shared reply window after Xen sampling and connection
+            // setup, so neither uses up the time available to qubes. Requests
+            // run in parallel with the remaining dom0 collection below.
+            let deadline = multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?
+                + handoff::TICK_WAIT_SECONDS;
             let expected = reporters.request(&tick_id);
             let readings = BTreeMap::new();
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
