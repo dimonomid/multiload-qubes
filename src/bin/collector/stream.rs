@@ -9,6 +9,8 @@ use crate::metrics::publish_bytes;
 use crate::metrics::{QubeIdentity, ReporterKey};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::sys::eventfd::{EfdFlags, EventFd};
 use nix::sys::signal::{killpg, Signal};
 use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
@@ -26,11 +28,17 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+// Maximum wait for an outstanding reply before reconnecting; idle connections have no timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// Wait after a failed connection before trying again; shutdown interrupts this wait.
 const RETRY_DELAY: Duration = Duration::from_secs(3);
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+// Check child exit this often after SIGTERM, during cleanup only. Live connections use poll().
+const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(20);
+// Allow the direct child this long to exit after SIGTERM, then SIGKILL the group and reap it.
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
+// Refill the reply budget at this rate to reject sustained excessive stdout traffic.
 const REPORTS_PER_SECOND: f64 = 4.0;
+// Maximum saved reply budget, allowing a short burst before the rate limit disconnects.
 const REPORT_BURST: f64 = 8.0;
 
 pub const METRICS_SCRIPT: &str = include_str!("../../../guest/metrics.py");
@@ -157,7 +165,7 @@ impl Drop for Process {
             if Instant::now() >= deadline {
                 break;
             }
-            thread::sleep(POLL_INTERVAL);
+            thread::sleep(PROCESS_CHECK_INTERVAL);
         }
         self.signal_group(Signal::SIGKILL);
         let _ = self.0.wait();
@@ -185,13 +193,44 @@ enum RequestState {
     /// Worker has taken this tick; it cannot accept another until reply or disconnect.
     Pending(String),
 }
-#[derive(Default)]
 /// Shared reservation slot between the sampling loop and one transport worker.
-struct Requests(Mutex<RequestState>);
+struct Requests {
+    /// Actual work stays here; eventfd only tells the worker to check it.
+    state: Mutex<RequestState>,
+    /// Interrupts pipe and retry waits when a request or stop arrives.
+    wake: EventFd,
+}
 impl Requests {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            state: Mutex::new(RequestState::default()),
+            wake: EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)?,
+        })
+    }
+    /// Update shared state before ringing. Several notifications may merge safely.
+    fn notify(&self) {
+        loop {
+            match self.wake.write(1) {
+                Ok(_) | Err(Errno::EAGAIN) => return,
+                Err(Errno::EINTR) => continue,
+                // The owned descriptor stays open while either thread can use it.
+                Err(error) => panic!("cannot notify reporter worker: {error}"),
+            }
+        }
+    }
+    fn clear_notification(&self) -> Result<(), Errno> {
+        loop {
+            match self.wake.read() {
+                Ok(_) | Err(Errno::EAGAIN) => return Ok(()),
+                Err(Errno::EINTR) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Claim an idle connection before adding it to the tick's expected replies.
     fn reserve(&self, tick_id: &str) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(*state, RequestState::Idle) {
             *state = RequestState::Queued(tick_id.into());
             true
@@ -200,11 +239,11 @@ impl Requests {
         }
     }
     fn ready(&self) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = RequestState::Idle;
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = RequestState::Idle;
     }
     /// Move a queued tick to pending before the worker writes its request.
     fn take(&self) -> Option<String> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let RequestState::Queued(tick_id) = &*state {
             let tick_id = tick_id.clone();
             *state = RequestState::Pending(tick_id.clone());
@@ -215,7 +254,7 @@ impl Requests {
     }
     /// Clear the reservation and return any tick that needs an unavailable reply.
     fn disconnect(&self) -> Option<String> {
-        match std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())) {
+        match std::mem::take(&mut *self.state.lock().unwrap_or_else(|e| e.into_inner())) {
             RequestState::Queued(tick_id) | RequestState::Pending(tick_id) => Some(tick_id),
             _ => None,
         }
@@ -234,7 +273,7 @@ enum LogEvent {
 pub struct Reader {
     /// Single request slot; prevents queuing ticks behind a busy guest.
     requested: Arc<Requests>,
-    /// Shared stop flag, checked during I/O polling and retry waits.
+    /// Shared stop flag, checked after pipe or retry waits are interrupted.
     stop: Arc<AtomicBool>,
     #[cfg(test)]
     /// Test observations of normal diagnostics; absent from production builds.
@@ -246,7 +285,7 @@ impl Reader {
     /// Start a worker that owns reconnects, pipe I/O, and local process cleanup.
     pub fn spawn(spec: CommandSpec, timing: Timing, target: RawTarget) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
-        let requested = Arc::new(Requests::default());
+        let requested = Arc::new(Requests::new()?);
         let worker_requested = requested.clone();
         let worker_stop = stop.clone();
         #[cfg(test)]
@@ -287,8 +326,22 @@ impl Reader {
                         let _ = log_tx.send(LogEvent::Unavailable(reason.clone()));
                     }
                     last_error = Some(reason);
-                    while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                        thread::sleep(POLL_INTERVAL);
+                    loop {
+                        if let Err(error) = worker_requested.clear_notification() {
+                            eprintln!("Cannot clear reporter notification: {error}");
+                            return;
+                        }
+                        if worker_stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                            break;
+                        }
+                        let mut fds = [PollFd::new(
+                            worker_requested.wake.as_fd(),
+                            PollFlags::POLLIN,
+                        )];
+                        if let Err(error) = wait(&mut fds, Some(deadline)) {
+                            eprintln!("Cannot wait to retry reporter: {error}");
+                            return;
+                        }
                     }
                 }
             })?;
@@ -302,11 +355,16 @@ impl Reader {
     }
     /// Accept one tick only while connected and idle. Never wait for guest I/O.
     pub fn request(&self, tick_id: &str) -> bool {
-        !self.stop.load(Ordering::Relaxed) && self.requested.reserve(tick_id)
+        let accepted = !self.stop.load(Ordering::Relaxed) && self.requested.reserve(tick_id);
+        if accepted {
+            self.requested.notify();
+        }
+        accepted
     }
     /// Request shutdown without waiting; stop all readers before joining them.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.requested.notify();
     }
     pub fn finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
@@ -317,6 +375,25 @@ impl Drop for Reader {
         self.stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+/// Sleep until a descriptor is ready or the deadline expires. Signals do not extend the deadline.
+fn wait(fds: &mut [PollFd<'_>], deadline: Option<Instant>) -> Result<(), Errno> {
+    loop {
+        // Round up to avoid spinning for the final fraction of a millisecond.
+        let timeout = deadline.map_or(PollTimeout::NONE, |deadline| {
+            let millis = deadline
+                .saturating_duration_since(Instant::now())
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min(i32::MAX as u128) as i32;
+            PollTimeout::try_from(millis).unwrap()
+        });
+        match poll(fds, timeout) {
+            Err(Errno::EINTR) => continue,
+            result => return result.map(|_| ()),
         }
     }
 }
@@ -364,10 +441,19 @@ fn session(
         // Allow a short burst of buffered replies, but bound sustained traffic.
         // Guest output is untrusted even when replies were requested.
         let mut budget = REPORT_BURST;
-        while !stop.load(Ordering::Relaxed) {
-            captured
-                .drain(&mut stderr)
-                .map_err(|e| format!("cannot read guest stderr: {e}"))?;
+        let mut stderr_open = true;
+        loop {
+            // Clear the doorbell before checking state. A later request/stop then
+            // either appears in that check or keeps poll readable: no wakeup is lost.
+            requested.clear_notification().map_err(|e| e.to_string())?;
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if stderr_open {
+                stderr_open = captured
+                    .drain(&mut stderr)
+                    .map_err(|e| format!("cannot read guest stderr: {e}"))?;
+            }
             if let Some(tick_id) = requested.take() {
                 let request = b"sample\n";
                 match stdin.write(request) {
@@ -378,7 +464,7 @@ fn session(
             }
             if pending
                 .as_ref()
-                .is_some_and(|(_, sent)| sent.elapsed() > timing.stale)
+                .is_some_and(|(_, sent)| sent.elapsed() >= timing.stale)
             {
                 return Err("reporter timed out".into());
             }
@@ -413,12 +499,19 @@ fn session(
                 }
                 Err(e)
                     if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::Interrupted =>
-                {
-                    thread::sleep(POLL_INTERVAL)
-                }
+                        || e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e.to_string()),
             }
+            let mut fds = [
+                PollFd::new(requested.wake.as_fd(), PollFlags::POLLIN),
+                PollFd::new(stdout.as_fd(), PollFlags::POLLIN),
+                PollFd::new(stderr.as_fd(), PollFlags::POLLIN),
+            ];
+            // EOF stays readable forever. Stop watching closed stderr so an idle
+            // connection does not spin after the guest closes that pipe alone.
+            let count = if stderr_open { 3 } else { 2 };
+            let deadline = pending.as_ref().map(|(_, sent)| *sent + timing.stale);
+            wait(&mut fds[..count], deadline).map_err(|e| e.to_string())?;
         }
         Ok(())
     })();
@@ -480,23 +573,34 @@ mod tests {
     }
 
     #[test]
-    fn stderr_flood_does_not_block_raw_replies() {
+    fn stderr_limit_disconnects_even_when_the_guest_answers_requests() {
         let attempts = Attempts::new();
-        let reader = attempts.start("import sys\nsys.stdin.readline()\nsys.stderr.write('x'*2_000_000); sys.stderr.flush()\nprint('opaque reply',flush=True)\ntime.sleep(30)", Timing { stale: Duration::from_secs(2), ..timing() });
-        request_when_ready(&reader, "test-tick");
-        assert_eq!(attempts.frame("test-tick").payload, b"opaque reply");
+        let reader = attempts.start(
+            "import sys\nfor command in sys.stdin:\n sys.stderr.write('x'*16384); sys.stderr.flush()\n print('opaque reply',flush=True)",
+            Timing { stale: Duration::from_secs(3), retry: Duration::from_secs(30) },
+        );
+        for tick_id in ["one", "two", "three", "four"] {
+            request_when_ready(&reader, tick_id);
+            assert_eq!(attempts.frame(tick_id).payload, b"opaque reply");
+        }
+        request_when_ready(&reader, "over-limit");
+        let error = await_failure(&reader);
+        assert!(error.contains("stderr limit"), "{error}");
+        assert!(error.contains("[truncated]"));
+        assert!(!reader.request("during-backoff"));
+        assert_eq!(attempts.pids().len(), 1);
         drop(reader);
         attempts.assert_reaped();
     }
 
     #[test]
-    fn stderr_only_flood_does_not_refresh_request_timeout() {
+    fn stderr_only_flood_is_disconnected_before_request_timeout() {
         let start = Instant::now();
         let error = session_error(
             "import os; exec(\"while True: os.write(2,b'x'*4096)\")",
-            Duration::from_millis(150),
+            Duration::from_secs(5),
         );
-        assert!(error.contains("reporter timed out"), "{error}");
+        assert!(error.contains("stderr limit"), "{error}");
         assert!(error.contains("[truncated]"));
         assert!(error.len() < 1300);
         assert!(start.elapsed() < Duration::from_secs(2));
@@ -847,8 +951,67 @@ mod tests {
         panic!("rapid requests did not hit the sample rate limit");
     }
     #[test]
+    fn notifications_survive_until_poll_and_merge_without_losing_requests() {
+        let requests = Requests::new().unwrap();
+        requests.ready();
+        assert!(requests.reserve("tick-1"));
+        requests.notify();
+        requests.notify();
+        let mut fds = [PollFd::new(requests.wake.as_fd(), PollFlags::POLLIN)];
+        // A notification sent before poll must remain readable.
+        assert_eq!(poll(&mut fds, PollTimeout::ZERO).unwrap(), 1);
+        requests.clear_notification().unwrap();
+        assert_eq!(poll(&mut fds, PollTimeout::ZERO).unwrap(), 0);
+        assert_eq!(requests.take().as_deref(), Some("tick-1"));
+
+        let requests = Arc::new(requests);
+        let worker_requests = requests.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut fds = [PollFd::new(worker_requests.wake.as_fd(), PollFlags::POLLIN)];
+            started_tx.send(()).unwrap();
+            wait(&mut fds, None).unwrap();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(80)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        requests.notify();
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn idle_connection_handles_closed_stderr_and_wakes_for_requests() {
+        let attempts = Attempts::new();
+        let reader = attempts.start(
+            &format!("import os\nos.close(2)\n{REPORTER}"),
+            Timing {
+                stale: Duration::from_secs(3),
+                ..timing()
+            },
+        );
+        attempts.wait_started();
+        // Let both pipes settle and the worker enter its idle wait.
+        thread::sleep(Duration::from_millis(200));
+        for tick_id in ["first", "second"] {
+            request_when_ready(&reader, tick_id);
+            assert_eq!(attempts.frame(tick_id).payload, b"opaque reply");
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(attempts.pids().len(), 1);
+        let stopped = Instant::now();
+        drop(reader);
+        assert!(stopped.elapsed() < Duration::from_secs(1));
+        attempts.assert_reaped();
+    }
+
+    #[test]
     fn request_slots_keep_tick_ids_and_skip_busy_connections() {
-        let requests = Requests::default();
+        let requests = Requests::new().unwrap();
         assert!(!requests.reserve("tick-1"));
         requests.ready();
         assert!(requests.reserve("tick-1"));

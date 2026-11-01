@@ -6,8 +6,15 @@ use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+// Security limit: a compromised qube could keep its dom0 worker busy by flooding
+// stderr, even while answering requests. Reporters normally write no stderr;
+// exceeding this lifetime byte limit disconnects the connection and triggers backoff.
+const STDERR_LIMIT: usize = 64 * 1024;
+// Keep only this many recent stderr bytes; older bytes are discarded.
 const CAPTURE_LIMIT: usize = 4096;
+// Maximum sanitized stderr excerpt included in a failure message, in bytes.
 const LOG_LIMIT: usize = 1024;
+// Briefly wait for exit status when reporting a failure; process cleanup has its own deadline.
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 
 /// Keep a bounded stderr tail for failures without letting a full pipe block the guest.
@@ -17,6 +24,8 @@ pub(super) struct StderrCapture {
     tail: Vec<u8>,
     /// Whether any older bytes were discarded.
     truncated: bool,
+    /// All stderr bytes read during this connection, including discarded bytes.
+    received: usize,
 }
 
 impl StderrCapture {
@@ -33,20 +42,26 @@ impl StderrCapture {
         }
     }
 
-    /// Read at most 64 KiB per turn, discarding old bytes after retaining 4 KiB.
-    /// The caller supplies a nonblocking pipe. Floods cannot monopolize a turn.
-    pub fn drain(&mut self, pipe: &mut impl Read) -> io::Result<()> {
+    /// Drain a nonblocking pipe, retaining its tail and enforcing the lifetime byte limit.
+    /// Return false at EOF so the worker stops watching the closed descriptor.
+    pub fn drain(&mut self, pipe: &mut impl Read) -> io::Result<bool> {
         let mut bytes = [0; 4096];
-        for _ in 0..16 {
+        while self.received <= STDERR_LIMIT {
             match pipe.read(&mut bytes) {
-                Ok(0) => break,
-                Ok(n) => self.append(&bytes[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Ok(0) => return Ok(false),
+                Ok(n) => {
+                    self.received += n;
+                    self.append(&bytes[..n]);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(true),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
         }
-        Ok(())
+        // Later diagnostic reads must stop too, rather than draining more of a flood.
+        Err(io::Error::other(
+            "guest exceeded stderr limit (64 KiB per connection)",
+        ))
     }
 
     /// Strip terminal escapes and controls, then bound the ASCII text sent to the journal.
@@ -188,11 +203,34 @@ mod tests {
     }
 
     #[test]
-    fn draining_has_a_fixed_work_budget_and_invalid_utf8_is_safe() {
+    fn stderr_limit_counts_discarded_bytes_across_reads_and_resets_per_connection() {
+        let mut capture = StderrCapture::default();
+        for _ in 0..4 {
+            assert!(!capture
+                .drain(&mut io::Cursor::new(vec![b'x'; STDERR_LIMIT / 4]))
+                .unwrap());
+        }
+        assert_eq!(capture.received, STDERR_LIMIT);
+        assert_eq!(capture.tail.len(), CAPTURE_LIMIT);
+        assert!(capture.drain(&mut io::Cursor::new(b"x")).is_err());
+        assert!(!StderrCapture::default()
+            .drain(&mut io::Cursor::new(b"x"))
+            .unwrap());
+    }
+
+    #[test]
+    fn draining_rejects_floods_and_does_not_read_more_during_failure_reporting() {
         let mut capture = StderrCapture::default();
         let mut bytes = io::Cursor::new(vec![b'x'; 100_000]);
-        capture.drain(&mut bytes).unwrap();
-        assert_eq!(bytes.position(), 16 * 4096);
+        assert!(capture
+            .drain(&mut bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("stderr limit"));
+        let position = bytes.position();
+        assert!(position > STDERR_LIMIT as u64 && position <= STDERR_LIMIT as u64 + 4096);
+        assert!(capture.drain(&mut bytes).is_err());
+        assert_eq!(bytes.position(), position);
         assert_eq!(capture.tail.len(), CAPTURE_LIMIT);
         capture.append(b"\xff\nerror");
         let text = capture.excerpt().unwrap();
