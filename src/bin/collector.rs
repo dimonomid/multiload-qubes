@@ -29,9 +29,9 @@ struct Cli {
     #[arg(long)]
     no_network: bool,
 
-    /// Disable guest RAM/swap collection; their RAM allocation remains unknown.
+    /// Disable general qube metrics (RAM/swap); network collection is separate.
     #[arg(long)]
-    no_guest_memory: bool,
+    no_qube_metrics: bool,
 }
 
 fn parse_interval(value: &str) -> Result<f64, String> {
@@ -56,7 +56,7 @@ impl From<Cli> for collector::Options {
             interval: cli.interval,
             output: cli.output,
             network: (!cli.no_network).then_some(cli.network_qube),
-            memory: !cli.no_guest_memory,
+            memory: !cli.no_qube_metrics,
         }
     }
 }
@@ -96,7 +96,7 @@ mod tests {
             "/tmp/metrics",
             "--network-qube",
             "other-net",
-            "--no-guest-memory",
+            "--no-qube-metrics",
         ])
         .unwrap();
         assert!(options.once && !options.memory);
@@ -133,6 +133,28 @@ mod tests {
         ] {
             assert!(parse(&args).unwrap().network.is_none());
         }
+    }
+
+    #[test]
+    fn general_qube_metrics_and_network_are_independent() {
+        for (args, expected_network) in [
+            (vec!["--no-qube-metrics"], Some("sys-net")),
+            (
+                vec!["--no-qube-metrics", "--network-qube", "other-net"],
+                Some("other-net"),
+            ),
+            (
+                vec!["--network-qube=other-net", "--no-qube-metrics"],
+                Some("other-net"),
+            ),
+            (vec!["--no-network", "--no-qube-metrics"], None),
+            (vec!["--no-qube-metrics", "--no-network"], None),
+        ] {
+            let options = parse(&args).unwrap();
+            assert!(!options.memory);
+            assert_eq!(options.network.as_deref(), expected_network);
+        }
+        assert!(parse(&["--no-network"]).unwrap().memory);
     }
 
     #[test]

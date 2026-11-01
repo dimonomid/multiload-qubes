@@ -22,7 +22,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const MEMORY_SCRIPT: &str = include_str!("../../guest/memory.py");
+pub const METRICS_SCRIPT: &str = include_str!("../../guest/metrics.py");
 pub const NETWORK_SCRIPT: &str = include_str!("../../guest/network.py");
 
 pub fn shell_quote(text: &str) -> String {
@@ -59,7 +59,7 @@ pub struct CommandSpec {
 impl CommandSpec {
     pub fn qube(name: &str, kind: Kind) -> Self {
         let script = match kind {
-            Kind::Memory(_) => MEMORY_SCRIPT,
+            Kind::Memory(_) => METRICS_SCRIPT,
             Kind::Network => NETWORK_SCRIPT,
         };
         Self {

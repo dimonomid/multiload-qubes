@@ -40,7 +40,7 @@ class GuestScripts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'meminfo'
             path.write_text('MemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 500 kB\nSwapFree: 0 kB\n')
-            script = (ROOT / 'guest/memory.py').read_text()
+            script = (ROOT / 'guest/metrics.py').read_text()
             script = script.replace("subprocess.check_output(['xenstore-read', 'domid'], text=True).strip()", "'23'")
             script = script.replace("'/proc/meminfo'", repr(str(path)))
             for line in self.check_requests(script):

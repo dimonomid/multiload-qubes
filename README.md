@@ -107,7 +107,7 @@ qubes. Collection continues even if you remove the panel plugin; stop the
 systemd service `multiload-qubes-collector` to stop collection. The collector
 has two options to disable qubes communication:
 
-- `--no-guest-memory`: if present, no RAM and swap info will be collected from
+- `--no-qube-metrics`: if present, no RAM and swap info will be collected from
   qubes
 - `--no-network`: if present, no network info will be collected from `sys-net`
 
@@ -208,7 +208,7 @@ Collector settings:
 
 - `--network-qube NAME`: qube to collect network traffic from; default `sys-net`.
 - `--no-network`: disable guest network collection.
-- `--no-guest-memory`: disable guest RAM and swap collection. Their RAM
+- `--no-qube-metrics`: disable guest RAM and swap collection. Their RAM
   allocation is still counted, but actual usage is unknown.
 - `--interval SECONDS`: host and guest collection interval, from `0.25` to `10`;
   default `0.5`.
