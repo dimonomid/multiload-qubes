@@ -1,5 +1,5 @@
-//! Parses guest bytes without opening Xen handles or launching guest commands.
-//! Directory watches follow atomic renames; a full rescan also covers lost events.
+//! Parses guest reports without Xen access. A collector tick is published once,
+//! when its accepted requests finish or its 100 ms deadline expires.
 use crate::metrics::handoff::{self, HostFrame, RawFrame};
 use crate::metrics::protocol::{Kind, Reading, Tracker};
 use crate::metrics::{eligible, publish, ram_snapshot, shutdown, snapshot, swap_snapshot};
@@ -7,7 +7,7 @@ use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
@@ -23,40 +23,88 @@ struct Report {
 struct Parser {
     reports: BTreeMap<String, Report>,
 }
-impl Parser {
-    fn read(
-        &mut self,
-        directory: &Path,
-        file: &str,
-        identity: &str,
-        kind: Kind,
-        max_age: f64,
-    ) -> Option<Reading> {
-        let frame: RawFrame = handoff::read_bounded(&directory.join(file), handoff::MAX_RAW_BYTES)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
-        // A report may be published while we scan the directory. Check its
-        // age after reading it, rather than against the start of the scan.
-        let now = unix_time_now().ok()?;
-        if frame.identity != identity
-            || !handoff::fresh(frame.timestamp, now, max_age)
-            || frame.payload.len() > handoff::MAX_REPORT_BYTES
-        {
-            self.reports.remove(file);
-            return None;
+
+struct PendingTick {
+    frame: HostFrame,
+    base: Snapshot,
+    // None is a terminal reply with no valid measurement (including network warmup).
+    replies: BTreeMap<String, Option<Reading>>,
+}
+impl PendingTick {
+    fn load(input: &Path, now: f64) -> Result<Self, String> {
+        let frame: HostFrame = serde_json::from_slice(&handoff::read_bounded(
+            &input.join("host.json"),
+            handoff::MAX_HOST_BYTES,
+        )?)
+        .map_err(|e| e.to_string())?;
+        let base = Snapshot::decode_fresh_at(&frame.metrics, now).map_err(|e| e.to_string())?;
+        if !frame.tick.deadline.is_finite() {
+            return Err("invalid tick deadline".into());
         }
+        Ok(Self {
+            frame,
+            base,
+            replies: BTreeMap::new(),
+        })
+    }
+    fn complete(&self) -> bool {
+        self.replies.len() == self.frame.tick.expected.len()
+    }
+    fn snapshot(&self) -> Result<Snapshot, String> {
+        let memory: BTreeMap<_, _> = eligible(&self.frame.host)
+            .keys()
+            .filter_map(|id| {
+                self.replies
+                    .get(&format!("memory-{id}"))
+                    .copied()
+                    .flatten()
+                    .map(|r| (*id, r))
+            })
+            .collect();
+        let usage = memory
+            .iter()
+            .filter_map(|(id, r)| match r {
+                Reading::Memory { used, .. } => Some((*id, *used)),
+                _ => None,
+            })
+            .collect();
+        let network = self.replies.get("network").copied().flatten();
+        let mut combined = snapshot(
+            &self.frame.host,
+            self.frame.dom0_ram.1,
+            &usage,
+            self.base.cpu,
+            network,
+            self.base.period,
+        )?;
+        // A live parser must not make stale host data look fresh.
+        combined.timestamp = self.base.timestamp;
+        combined.qube_cpu = self.base.qube_cpu.clone();
+        combined.disk = self.base.disk.clone();
+        combined.qube_ram = Some(ram_snapshot(&self.frame.host, self.frame.dom0_ram, &memory));
+        combined.swap = Some(swap_snapshot(
+            &self.frame.host,
+            self.frame.dom0_swap,
+            &memory,
+        ));
+        Ok(combined)
+    }
+}
+
+impl Parser {
+    fn parse(&mut self, file: &str, frame: RawFrame, kind: Kind) -> Option<Reading> {
         let report = self.reports.entry(file.into()).or_insert_with(|| Report {
-            identity: identity.into(),
+            identity: frame.identity.clone(),
             session: frame.session.clone(),
             timestamp: 0.0,
             tracker: Tracker::new(kind),
             reading: None,
             last_error: None,
         });
-        if report.identity != identity || report.session != frame.session {
+        if report.identity != frame.identity || report.session != frame.session {
             *report = Report {
-                identity: identity.into(),
-                session: frame.session.clone(),
+                identity: frame.identity,
+                session: frame.session,
                 timestamp: 0.0,
                 tracker: Tracker::new(kind),
                 reading: None,
@@ -77,7 +125,6 @@ impl Parser {
                         eprintln!("Guest metrics [{file}] invalid: {error}");
                         report.last_error = Some(error);
                     }
-                    // Do not retain a network baseline across malformed reports.
                     report.tracker = Tracker::new(kind);
                     None
                 }
@@ -86,65 +133,70 @@ impl Parser {
         report.reading
     }
 
-    fn collect(&mut self, input: &Path, now: f64) -> Result<Snapshot, String> {
-        let frame: HostFrame = serde_json::from_slice(&handoff::read_bounded(
-            &input.join("host.json"),
-            handoff::MAX_HOST_BYTES,
-        )?)
-        .map_err(|e| e.to_string())?;
-        let base = Snapshot::decode_fresh_at(&frame.metrics, now).map_err(|e| e.to_string())?;
-        let raw = input.join("raw");
-        let max_age = (base.period * 4.0).max(handoff::STALE_SECONDS);
-        let mut memory = BTreeMap::new();
-        let mut wanted = std::collections::BTreeSet::new();
-        let active = eligible(&frame.host);
-        for (id, key) in active
-            .iter()
-            .take(if frame.memory_enabled { 128 } else { 0 })
-        {
-            let file = format!("memory-{id}");
-            wanted.insert(file.clone());
-            if let Some(reading) = self.read(
-                &raw,
-                &file,
-                &format!("{id}/{}", key.uuid),
-                Kind::Memory(*id),
-                max_age,
-            ) {
-                memory.insert(*id, reading);
-            }
+    fn ingest(&mut self, input: &Path, pending: &mut PendingTick, file: &str) {
+        let Some(identity) = pending.frame.tick.expected.get(file) else {
+            return;
+        };
+        if pending.replies.contains_key(file) {
+            return;
         }
-        // The network report carries a root-supplied incarnation key. Match it
-        // to a currently running guest before using its counters.
-        let network = frame
-            .network_identity
-            .as_deref()
-            .and_then(|identity| self.read(&raw, "network", identity, Kind::Network, max_age));
-        wanted.insert("network".into());
-        self.reports.retain(|file, _| wanted.contains(file));
-        let usage = memory
-            .iter()
-            .filter_map(|(id, r)| match r {
-                Reading::Memory { used, .. } => Some((*id, *used)),
-                _ => None,
-            })
-            .collect();
-        let mut combined = snapshot(
-            &frame.host,
-            frame.dom0_ram.1,
-            &usage,
-            base.cpu,
-            network,
-            base.period,
-        )?;
-        // Keep the host's timestamp: a live parser must not make stale host data
-        // appear fresh when the privileged collector has stopped reporting.
-        combined.timestamp = base.timestamp;
-        combined.qube_cpu = base.qube_cpu;
-        combined.disk = base.disk;
-        combined.qube_ram = Some(ram_snapshot(&frame.host, frame.dom0_ram, &memory));
-        combined.swap = Some(swap_snapshot(&frame.host, frame.dom0_swap, &memory));
-        Ok(combined)
+        let Some(frame) =
+            handoff::read_bounded(&input.join("raw").join(file), handoff::MAX_RAW_BYTES)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<RawFrame>(&b).ok())
+        else {
+            return;
+        };
+        let Ok(now) = unix_time_now() else {
+            return;
+        };
+        if frame.tick_id != pending.frame.tick.tick_id
+            || frame.identity != *identity
+            || frame.timestamp > pending.frame.tick.deadline
+            || !handoff::fresh(
+                frame.timestamp,
+                now,
+                (pending.base.period * 4.0).max(handoff::STALE_SECONDS),
+            )
+            || frame.payload.len() > handoff::MAX_REPORT_BYTES
+        {
+            return;
+        }
+        let kind = if file == "network" {
+            Kind::Network
+        } else {
+            let Some(id) = file.strip_prefix("memory-").and_then(|s| s.parse().ok()) else {
+                return;
+            };
+            Kind::Memory(id)
+        };
+        let reading = if frame.session == "disconnected" && frame.payload.is_empty() {
+            self.reports.remove(file);
+            None
+        } else {
+            self.parse(file, frame, kind)
+        };
+        pending.replies.insert(file.into(), reading);
+    }
+    fn rescan(&mut self, input: &Path, pending: &mut PendingTick) {
+        let files: Vec<_> = pending.frame.tick.expected.keys().cloned().collect();
+        for file in files {
+            self.ingest(input, pending, &file);
+        }
+    }
+    fn prune(&mut self, frame: &HostFrame) {
+        let active = eligible(&frame.host);
+        self.reports.retain(|file, report| {
+            if file == "network" {
+                frame.network_identity.as_ref() == Some(&report.identity)
+            } else {
+                frame.memory_enabled
+                    && active.iter().any(|(id, key)| {
+                        file == &format!("memory-{id}")
+                            && report.identity == format!("{id}/{}", key.uuid)
+                    })
+            }
+        });
     }
 }
 
@@ -161,59 +213,127 @@ pub fn run(options: Options) -> Result<(), String> {
         | AddWatchFlags::IN_DELETE
         | AddWatchFlags::IN_DELETE_SELF
         | AddWatchFlags::IN_MOVE_SELF;
-    // Install both watches before reading anything, including on parser restart.
-    watch
+    // Watch directories before the initial read; atomic publications replace inodes.
+    let host_watch = watch
         .add_watch(&options.input, flags)
         .map_err(|e| e.to_string())?;
-    watch
+    let raw_watch = watch
         .add_watch(&options.input.join("raw"), flags)
         .map_err(|e| e.to_string())?;
     let mut parser = Parser::default();
+    let mut pending: Option<PendingTick> = None;
+    let mut finished_tick_id: Option<String> = None;
+    let mut host_changed = true;
+    let mut rescan = false;
+    let mut changed: BTreeSet<String> = BTreeSet::new();
+    let mut fresh_until = 0.0;
     let mut last_error = None;
     while !shutdown.requested() {
-        let result = unix_time_now()
-            .map_err(|e| e.to_string())
-            .and_then(|now| parser.collect(&options.input, now))
-            .and_then(|snapshot| snapshot.encode().map_err(|e| e.to_string()))
-            .and_then(|text| publish(&options.output, &text));
-        match result {
-            Ok(()) => {
-                last_error = None;
-            }
-            Err(error) => {
-                // Never leave the last combined snapshot looking usable after
-                // its host input goes missing or becomes invalid.
-                let _ = std::fs::remove_file(&options.output);
-                if last_error.as_ref() != Some(&error) {
-                    eprintln!("Cannot parse guest metrics: {error}");
-                    last_error = Some(error);
+        let now = unix_time_now().map_err(|e| e.to_string())?;
+        if host_changed {
+            host_changed = false;
+            match PendingTick::load(&options.input, now) {
+                Ok(next) => {
+                    last_error = None;
+                    fresh_until =
+                        next.base.timestamp + (next.base.period * 4.0).max(handoff::STALE_SECONDS);
+                    let same_pending = pending
+                        .as_ref()
+                        .is_some_and(|p| p.frame.tick.tick_id == next.frame.tick.tick_id);
+                    if !same_pending && finished_tick_id.as_ref() != Some(&next.frame.tick.tick_id)
+                    {
+                        // If this process was descheduled past a whole tick, finish
+                        // the tick already in memory before moving to the new one.
+                        if let Some(previous) = pending.take() {
+                            publish_tick(&options.output, &previous)?;
+                        }
+                        parser.prune(&next.frame);
+                        pending = Some(next);
+                        rescan = true;
+                    }
+                }
+                Err(error) => {
+                    pending = None;
+                    fresh_until = 0.0;
+                    if last_error.as_ref() != Some(&error) {
+                        eprintln!("Cannot parse guest metrics: {error}");
+                        last_error = Some(error);
+                    }
                 }
             }
         }
+        if let Some(tick) = pending.as_mut() {
+            if rescan {
+                parser.rescan(&options.input, tick);
+            } else {
+                for file in &changed {
+                    parser.ingest(&options.input, tick, file);
+                }
+            }
+            if tick.complete()
+                || unix_time_now().map_err(|e| e.to_string())? >= tick.frame.tick.deadline
+            {
+                // One last bounded scan covers notifications not read yet. Only
+                // reports stamped before the deadline can contribute.
+                if !tick.complete() {
+                    parser.rescan(&options.input, tick);
+                }
+                publish_tick(&options.output, tick)?;
+                finished_tick_id = Some(tick.frame.tick.tick_id.clone());
+                pending = None;
+            }
+        }
+        rescan = false;
+        changed.clear();
+        if now > fresh_until {
+            let _ = std::fs::remove_file(&options.output);
+        }
+        let timeout_ms = pending.as_ref().map_or(1000, |tick| {
+            ((tick.frame.tick.deadline - unix_time_now().unwrap_or(now)).max(0.0) * 1000.0)
+                .ceil()
+                .min(1000.0) as u16
+        });
         let mut fds = [PollFd::new(watch.as_fd(), PollFlags::POLLIN)];
-        match poll(&mut fds, 1000_u16) {
-            Ok(0) => continue, // Expire guest reports even if all writers stop.
+        match poll(&mut fds, timeout_ms) {
+            Ok(0) => continue,
             Ok(_) => {}
             Err(Errno::EINTR) => continue,
             Err(error) => return Err(error.to_string()),
         }
         match watch.read_events() {
             Ok(events) => {
-                if events.iter().any(|e| {
-                    e.mask.intersects(
+                for event in events {
+                    if event.mask.intersects(
                         AddWatchFlags::IN_IGNORED
                             | AddWatchFlags::IN_DELETE_SELF
                             | AddWatchFlags::IN_MOVE_SELF,
-                    )
-                }) {
-                    return Err("input directory was replaced; restarting watches".into());
+                    ) {
+                        return Err("input directory was replaced; restarting watches".into());
+                    }
+                    if event.mask.contains(AddWatchFlags::IN_Q_OVERFLOW) {
+                        host_changed = true;
+                        rescan = true;
+                    }
+                    if let Some(name) = event.name.and_then(|s| s.into_string().ok()) {
+                        if event.wd == host_watch && name == "host.json" {
+                            host_changed = true;
+                        }
+                        if event.wd == raw_watch {
+                            changed.insert(name);
+                        }
+                    }
                 }
-                // Always rescan, including IN_Q_OVERFLOW. Events are hints,
-                // not a queue of reports that must each be replayed.
             }
             Err(Errno::EAGAIN) | Err(Errno::EINTR) => {}
             Err(error) => return Err(error.to_string()),
         }
     }
     Ok(())
+}
+
+fn publish_tick(output: &Path, tick: &PendingTick) -> Result<(), String> {
+    publish(
+        output,
+        &tick.snapshot()?.encode().map_err(|e| e.to_string())?,
+    )
 }

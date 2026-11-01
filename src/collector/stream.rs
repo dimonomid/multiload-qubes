@@ -35,11 +35,12 @@ pub struct RawTarget {
     pub identity: String,
 }
 impl RawTarget {
-    pub fn publish(&self, session: &str, payload: &[u8]) -> Result<(), String> {
+    pub fn publish(&self, tick_id: &str, session: &str, payload: &[u8]) -> Result<(), String> {
         if payload.len() > MAX_REPORT_BYTES {
             return Err("oversized raw report".into());
         }
         let frame = RawFrame {
+            tick_id: tick_id.into(),
             identity: self.identity.clone(),
             session: session.into(),
             timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
@@ -193,11 +194,54 @@ impl Connection {
     }
 }
 
+// The collector reserves an idle worker before listing it in a tick manifest.
+// No lock is held during process I/O, and a busy worker never queues another tick.
+#[derive(Default)]
+enum RequestState {
+    #[default]
+    Disconnected,
+    Idle,
+    Queued(String),
+    Pending(String),
+}
+#[derive(Default)]
+struct Requests(Mutex<RequestState>);
+impl Requests {
+    fn reserve(&self, tick_id: &str) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*state, RequestState::Idle) {
+            *state = RequestState::Queued(tick_id.into());
+            true
+        } else {
+            false
+        }
+    }
+    fn ready(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = RequestState::Idle;
+    }
+    fn take(&self) -> Option<String> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let RequestState::Queued(tick_id) = &*state {
+            let tick_id = tick_id.clone();
+            *state = RequestState::Pending(tick_id.clone());
+            Some(tick_id)
+        } else {
+            None
+        }
+    }
+    fn disconnect(&self) -> Option<String> {
+        match std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())) {
+            RequestState::Queued(tick_id) | RequestState::Pending(tick_id) => Some(tick_id),
+            _ => None,
+        }
+    }
+}
+
 type SharedConnection = Arc<Mutex<Connection>>;
 /// Owns a reporting worker. Dropping it requests a stop and waits for the worker.
 /// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
-    requested: Arc<AtomicBool>,
+    requested: Arc<Requests>,
     stop: Arc<AtomicBool>,
     #[cfg(test)]
     connection: SharedConnection,
@@ -225,7 +269,7 @@ impl Reader {
         target: Option<RawTarget>,
     ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
-        let requested = Arc::new(AtomicBool::new(false));
+        let requested = Arc::new(Requests::default());
         let worker_requested = requested.clone();
         let connection = Arc::new(Mutex::new(Connection::new()));
         let (worker_stop, worker_connection) = (stop.clone(), connection.clone());
@@ -246,10 +290,11 @@ impl Reader {
                         target.as_ref(),
                         &worker_requested,
                     );
-                    if let Some(target) = &target {
-                        // An empty frame clears the parser's previous value on
-                        // disconnect instead of leaving it visible until timeout.
-                        let _ = target.publish("disconnected", &[]);
+                    if let Some(tick_id) = worker_requested.disconnect() {
+                        if let Some(target) = &target {
+                            // A failed request is a terminal, unavailable reply.
+                            let _ = target.publish(&tick_id, "disconnected", &[]);
+                        }
                     }
                     if worker_stop.load(Ordering::Relaxed) {
                         break;
@@ -307,9 +352,9 @@ impl Reader {
             .unwrap_or_else(|e| e.into_inner())
             .value(Instant::now(), self.timing.stale)
     }
-    /// Coalesce ticks without blocking the host sampling loop.
-    pub fn request(&self) {
-        self.requested.store(true, Ordering::Relaxed);
+    /// Accept one tick only while connected and idle. Never wait for guest I/O.
+    pub fn request(&self, tick_id: &str) -> bool {
+        !self.stop.load(Ordering::Relaxed) && self.requested.reserve(tick_id)
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -342,7 +387,7 @@ fn session(
         stop,
         connection,
         None,
-        &AtomicBool::new(false),
+        &Requests::default(),
     )
 }
 
@@ -353,7 +398,7 @@ fn session_inner(
     stop: &AtomicBool,
     connection: &SharedConnection,
     target: Option<&RawTarget>,
-    requested: &AtomicBool,
+    requested: &Requests,
 ) -> Result<(), String> {
     let mut command = Command::new(&spec.program);
     command
@@ -379,12 +424,15 @@ fn session_inner(
     let mut stderr = proc.0.stderr.take().ok_or("missing stderr")?;
     set_nonblocking(&stderr).map_err(|e| e.to_string())?;
     let mut captured = StderrCapture::default();
+    if target.is_some() {
+        requested.ready();
+    }
     let result = (|| -> Result<(), String> {
         let mut tracker = Tracker::new(kind);
         let mut buffer = Vec::new();
         let mut chunk = [0; 4096];
         let mut last = Instant::now();
-        let mut pending: Option<Instant> = None;
+        let mut pending: Option<(String, Instant)> = None;
         let mut budget_time = last;
         // Allow a short burst of buffered lines, but reject a stream that keeps
         // sending more than four samples per second. Guest output is untrusted.
@@ -394,25 +442,19 @@ fn session_inner(
                 .drain(&mut stderr)
                 .map_err(|e| format!("cannot read guest stderr: {e}"))?;
             if target.is_some() {
-                let tick = requested.swap(false, Ordering::Relaxed);
-                // Ignore ticks while a reply is outstanding; never queue catch-up
-                // requests for a slow guest.
-                if pending.is_none() && tick {
+                if let Some(tick_id) = requested.take() {
                     let request = b"sample\n";
                     match stdin.write(request) {
-                        Ok(n) if n == request.len() => pending = Some(Instant::now()),
+                        Ok(n) if n == request.len() => pending = Some((tick_id, Instant::now())),
                         Ok(_) => return Err("incomplete sample request".into()),
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                            ) => {}
                         Err(error) => return Err(format!("cannot request guest sample: {error}")),
                     }
                 }
             }
             let timed_out = if target.is_some() {
-                pending.is_some_and(|sent| sent.elapsed() > timing.stale)
+                pending
+                    .as_ref()
+                    .is_some_and(|(_, sent)| sent.elapsed() > timing.stale)
             } else {
                 last.elapsed() > timing.stale
             };
@@ -436,10 +478,9 @@ fn session_inner(
                             return Err("guest exceeded sample rate limit".into());
                         }
                         let reading = if let Some(target) = target {
-                            if pending.take().is_none() {
-                                return Err("unsolicited guest report".into());
-                            }
-                            target.publish(&session, &buffer[..end])?;
+                            let (tick_id, _) = pending.take().ok_or("unsolicited guest report")?;
+                            target.publish(&tick_id, &session, &buffer[..end])?;
+                            requested.ready();
                             None
                         } else {
                             tracker.update(&buffer[..end])?
@@ -886,6 +927,29 @@ mod tests {
         }
     }
 
+    fn request_when_ready(reader: &Reader, tick_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !reader.request(tick_id) {
+            assert!(Instant::now() < deadline, "worker did not become idle");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn request_slots_keep_tick_ids_and_skip_busy_connections() {
+        let requests = Requests::default();
+        assert!(!requests.reserve("tick-1"));
+        requests.ready();
+        assert!(requests.reserve("tick-1"));
+        assert!(!requests.reserve("tick-2"));
+        assert_eq!(requests.take().as_deref(), Some("tick-1"));
+        assert!(!requests.reserve("tick-2"));
+        assert_eq!(requests.disconnect().as_deref(), Some("tick-1"));
+        assert!(!requests.reserve("tick-3"));
+        requests.ready();
+        assert!(requests.reserve("tick-3"));
+        assert_eq!(requests.take().as_deref(), Some("tick-3"));
+    }
+
     #[test]
     fn requests_are_tick_driven_and_do_not_queue_behind_a_slow_reply() {
         let attempts = Attempts::new();
@@ -918,14 +982,14 @@ mod tests {
             reader.connection.lock().unwrap().state,
             ConnectionState::Retrying { .. }
         ));
-        reader.request();
+        request_when_ready(&reader, "test-tick");
         let deadline = Instant::now() + Duration::from_secs(3);
         while !requests.exists() {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(5));
         }
         for _ in 0..10 {
-            reader.request();
+            assert!(!reader.request("skipped-tick"));
             thread::sleep(Duration::from_millis(2));
         }
         thread::sleep(Duration::from_millis(40));
@@ -938,11 +1002,16 @@ mod tests {
         }
         let frame: RawFrame = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(frame.payload, b"M1 23 1000 400");
+        assert_eq!(frame.tick_id, "test-tick");
         thread::sleep(Duration::from_millis(40));
         assert_eq!(std::fs::read_to_string(&requests).unwrap(), "sample\n");
-        reader.request();
+        request_when_ready(&reader, "next-tick");
         let deadline = Instant::now() + Duration::from_secs(3);
-        while std::fs::read_to_string(&requests).unwrap().lines().count() < 2 {
+        loop {
+            let frame: RawFrame = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+            if frame.tick_id == "next-tick" {
+                break;
+            }
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(5));
         }
@@ -966,11 +1035,15 @@ mod tests {
             },
         )
         .unwrap();
-        reader.request();
+        request_when_ready(&reader, "test-tick");
         await_retry(&reader);
         assert!(
             matches!(&reader.connection.lock().unwrap().state, ConnectionState::Retrying { reason, .. } if reason.starts_with("reporter timed out"))
         );
+        let frame: RawFrame =
+            serde_json::from_slice(&std::fs::read(attempts.0.join("raw")).unwrap()).unwrap();
+        assert_eq!(frame.tick_id, "test-tick");
+        assert!(frame.payload.is_empty());
         drop(reader);
         attempts.assert_reaped();
     }

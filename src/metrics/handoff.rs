@@ -1,6 +1,7 @@
 //! Root-owned files passed to the parser. Guest bytes never choose a path or identity.
 use super::Host;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -10,8 +11,19 @@ pub const MAX_RAW_BYTES: usize = 64 * 1024;
 pub const MAX_HOST_BYTES: usize = 1024 * 1024;
 pub const STALE_SECONDS: f64 = 5.0;
 
+pub const TICK_WAIT_SECONDS: f64 = 0.1;
+
+#[derive(Serialize, Deserialize)]
+pub struct Tick {
+    pub tick_id: String,
+    pub deadline: f64,
+    /// File names and incarnation keys accepted by idle transport workers.
+    pub expected: BTreeMap<String, String>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct HostFrame {
+    pub tick: Tick,
     pub host: Host,
     pub metrics: String,
     pub memory_enabled: bool,
@@ -22,6 +34,7 @@ pub struct HostFrame {
 
 #[derive(Serialize, Deserialize)]
 pub struct RawFrame {
+    pub tick_id: String,
     pub identity: String,
     pub session: String,
     pub timestamp: f64,

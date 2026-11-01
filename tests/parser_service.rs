@@ -1,6 +1,7 @@
 //! Exercises the real parser process through atomic file publication and inotify.
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use serde_json::json;
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 struct Fixture {
     path: PathBuf,
     child: Option<Child>,
+    sequence: Cell<u64>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -21,7 +23,11 @@ impl Fixture {
                 .as_nanos()
         ));
         fs::create_dir_all(path.join("raw")).unwrap();
-        Self { path, child: None }
+        Self {
+            path,
+            child: None,
+            sequence: Cell::new(0),
+        }
     }
     fn write(&self, name: &str, bytes: &[u8]) {
         let path = self.path.join(name);
@@ -29,18 +35,43 @@ impl Fixture {
         fs::write(&tmp, bytes).unwrap();
         fs::rename(tmp, path).unwrap();
     }
-    fn host(&self, timestamp: f64, memory: bool) {
-        self.host_period(timestamp, memory, 0.5);
+    fn begin(&self, expected: &[&str], wait: f64, memory: bool) -> f64 {
+        self.begin_at(now(), expected, wait, memory, 0.5)
     }
-    fn host_period(&self, timestamp: f64, memory: bool, period: f64) {
+    fn begin_at(
+        &self,
+        timestamp: f64,
+        expected: &[&str],
+        wait: f64,
+        memory: bool,
+        period: f64,
+    ) -> f64 {
+        self.sequence.set(self.sequence.get() + 1);
         let domain = |id| json!({"id":id,"identity":format!("uuid-{id}"),"name":format!("qube-{id}"),"cpu_ns":0,"vcpus":2,"allocated":1000,"paused":false,"shutdown":false,"stubdom":null});
+        let expected: std::collections::BTreeMap<_, _> =
+            expected.iter().map(|file| (*file, "1/uuid-1")).collect();
         let metrics =
             format!("MQ2 {timestamp:.6} 25 4000 2000 100 1000 0 {period} unknown unknown\n");
-        let frame = json!({"host":{"total":4000,"free":2000,"cpus":4,"domains":[domain(0),domain(1)]},"metrics":metrics,"memory_enabled":memory,"network_identity":"1/uuid-1","dom0_ram":[1000,100],"dom0_swap":[100,50]});
+        let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline":now()+wait,"expected":expected},"host":{"total":4000,"free":2000,"cpus":4,"domains":[domain(0),domain(1)]},"metrics":metrics,"memory_enabled":memory,"network_identity":"1/uuid-1","dom0_ram":[1000,100],"dom0_swap":[100,50]});
         self.write("host.json", &serde_json::to_vec(&frame).unwrap());
+        timestamp
     }
-    fn raw(&self, file: &str, identity: &str, session: &str, timestamp: f64, bytes: &[u8]) {
-        self.write(&format!("raw/{file}"), &serde_json::to_vec(&json!({"identity":identity,"session":session,"timestamp":timestamp,"payload":bytes})).unwrap());
+    fn tick_id(&self) -> String {
+        format!("collector-a/{}", self.sequence.get())
+    }
+    fn raw(&self, file: &str, session: &str, bytes: &[u8]) {
+        self.raw_for(file, &self.tick_id(), "1/uuid-1", session, now(), bytes);
+    }
+    fn raw_for(
+        &self,
+        file: &str,
+        tick_id: &str,
+        identity: &str,
+        session: &str,
+        timestamp: f64,
+        bytes: &[u8],
+    ) {
+        self.write(&format!("raw/{file}"),&serde_json::to_vec(&json!({"tick_id":tick_id,"identity":identity,"session":session,"timestamp":timestamp,"payload":bytes})).unwrap());
     }
     fn start(&mut self) {
         let _ = fs::remove_file(self.path.join("metrics"));
@@ -76,23 +107,29 @@ impl Fixture {
         }
     }
     #[track_caller]
-    fn wait(&self, condition: impl Fn(&Snapshot) -> bool) -> Snapshot {
+    fn wait(&self, stamp: f64) -> Snapshot {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if let Ok(snapshot) = fs::read_to_string(self.path.join("metrics"))
+            if let Ok(s) = fs::read_to_string(self.path.join("metrics"))
                 .map_err(|e| e.to_string())
                 .and_then(|s| Snapshot::decode(&s).map_err(|e| e.to_string()))
             {
-                if condition(&snapshot) {
-                    return snapshot;
+                if (s.timestamp - stamp).abs() < 0.00001 {
+                    return s;
                 }
             }
             assert!(
                 Instant::now() < deadline,
-                "parser output did not reach expected state"
+                "parser output did not reach expected tick"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+    fn version(&self) -> std::time::SystemTime {
+        fs::metadata(self.path.join("metrics"))
+            .unwrap()
+            .modified()
+            .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -107,163 +144,125 @@ impl Drop for Fixture {
 fn now() -> f64 {
     unix_time_now().unwrap()
 }
+const MEMORY: &[u8] = b"M2 1 1000 400 500 125";
+const NETWORK: &[u8] = b"N1 1000000000 12345678-1234-1234-1234-123456789abc 1:100:200";
 
 #[test]
-fn parses_atomic_updates_checks_identity_expires_reports_and_recovers_after_restart() {
+fn publishes_once_when_all_reports_arrive_without_waiting_for_deadline() {
     let mut f = Fixture::new();
-    f.host(now(), true);
+    let stamp = f.begin(&["memory-1", "network"], 2.0, true);
+    // A fast reply may be on disk before the parser reads the manifest.
+    f.raw("memory-1", "a", MEMORY);
     f.start();
-    f.wait(|s| s.unknown == 1000);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now(),
-        b"M2 1 1000 400 500 125",
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(
+        !f.path.join("metrics").exists(),
+        "must wait for the other requested report"
     );
-    let s = f.wait(|s| s.used == 700);
+    let sent = Instant::now();
+    f.raw("network", "a", NETWORK);
+    let s = f.wait(stamp);
+    assert!(
+        sent.elapsed() < Duration::from_secs(1),
+        "must not wait for the two-second test deadline"
+    );
+    assert_eq!(s.used, 700);
     assert_eq!(s.swap.unwrap().entries[1].used, 375);
-    assert_eq!(s.qube_ram.unwrap().entries[1].used, 600);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now(),
-        b"M2 999 1000 400 500 125",
+    let version = f.version();
+    f.raw("memory-1", "a", b"M2 1 1000 100 500 125");
+    f.raw("network", "a", NETWORK);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        f.version(),
+        version,
+        "completed ticks must not be republished"
     );
-    f.wait(|s| s.unknown == 1000);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now(),
-        b"M2 1 1000 400 500 125",
+    f.stop();
+}
+
+#[test]
+fn deadline_publishes_partial_data_and_late_replies_do_not_change_it() {
+    let mut f = Fixture::new();
+    let start = Instant::now();
+    let stamp = f.begin(&["memory-1", "network"], 0.1, true);
+    let old_tick_id = f.tick_id();
+    f.raw("memory-1", "a", MEMORY);
+    f.start();
+    let s = f.wait(stamp);
+    assert!(start.elapsed() >= Duration::from_millis(90));
+    assert_eq!(s.used, 700);
+    assert!(s.network.is_none());
+    let version = f.version();
+    f.raw("network", "a", NETWORK);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(f.version(), version);
+    let next = f.begin(&["network"], 0.1, true);
+    f.raw_for("network", &old_tick_id, "1/uuid-1", "a", now(), NETWORK);
+    assert!(
+        f.wait(next).network.is_none(),
+        "an old reply cannot satisfy the next tick"
     );
-    f.wait(|s| s.used == 700);
-    f.raw(
+    f.stop();
+}
+
+#[test]
+fn validates_reports_recovers_from_bad_files_and_preserves_network_baselines() {
+    let mut f = Fixture::new();
+    let stamp = f.begin(&["network"], 0.1, true);
+    f.raw("network", "a", NETWORK);
+    f.start();
+    assert!(f.wait(stamp).network.is_none());
+    let report = |stamp, rx| format!("N1 {stamp} 12345678-1234-1234-1234-123456789abc 1:{rx}:200");
+    let stamp = f.begin(&["network"], 0.1, true);
+    f.raw("network", "a", report(1_500_000_000_u64, 600).as_bytes());
+    assert_eq!(f.wait(stamp).network, Some((1000.0, 0.0)));
+    let stamp = f.begin(&["network"], 0.1, true);
+    f.raw("network", "b", report(2_000_000_000_u64, 1100).as_bytes());
+    assert!(f.wait(stamp).network.is_none());
+    let stamp = f.begin(&["network"], 0.1, true);
+    f.raw("network", "b", report(2_500_000_000_u64, 1600).as_bytes());
+    assert_eq!(f.wait(stamp).network, Some((1000.0, 0.0)));
+    for bytes in [b"M2 999 1000 400 500 125".as_slice(), &[0xff, 0, 0x1b]] {
+        let stamp = f.begin(&["memory-1"], 0.1, true);
+        f.raw("memory-1", "a", bytes);
+        assert_eq!(f.wait(stamp).unknown, 1000);
+    }
+    let stamp = f.begin(&["memory-1"], 0.1, true);
+    f.raw_for(
         "memory-1",
+        &f.tick_id(),
         "1/old-incarnation",
-        "connection-a",
+        "a",
         now(),
-        b"M2 1 1000 400 500 125",
+        MEMORY,
     );
-    f.wait(|s| s.unknown == 1000);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now(),
-        b"M2 1 1000 400 500 125",
-    );
-    f.wait(|s| s.used == 700);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now() - 10.0,
-        b"M2 1 1000 400 500 125",
-    );
-    f.wait(|s| s.unknown == 1000);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "connection-a",
-        now(),
-        b"M2 1 1000 400 500 125",
-    );
-    f.wait(|s| s.used == 700);
+    assert_eq!(f.wait(stamp).unknown, 1000);
+    let stamp = f.begin(&["network"], 0.1, true);
+    f.write("raw/network", &vec![b'x'; 70 * 1024]);
+    assert!(f.wait(stamp).network.is_none());
+    let stamp = f.begin(&["memory-1"], 0.1, true);
+    f.raw("memory-1", "a", MEMORY);
+    assert_eq!(f.wait(stamp).used, 700);
     f.stop();
     f.start();
-    f.wait(|s| s.used == 700);
-    f.host(now(), false);
-    f.wait(|s| s.unknown == 1000);
-    f.host(now() - 60.0, false);
+    assert_eq!(f.wait(stamp).used, 700);
+    f.stop();
+}
+
+#[test]
+fn empty_manifests_publish_immediately_and_stale_hosts_are_removed() {
+    let mut f = Fixture::new();
+    let stamp = f.begin(&[], 2.0, false);
+    f.start();
+    let s = f.wait(stamp);
+    assert_eq!(s.unknown, 1000);
+    f.begin_at(now() - 60.0, &[], 0.1, false, 0.5);
     let deadline = Instant::now() + Duration::from_secs(3);
     while f.path.join("metrics").exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        !f.path.join("metrics").exists(),
-        "stale host must not be republished as fresh"
-    );
-    f.host(now(), true);
-    f.wait(|s| s.used == 700);
-    f.stop();
-}
-
-#[test]
-fn network_reconnects_reset_the_baseline_and_malformed_files_do_not_crash_parser() {
-    let mut f = Fixture::new();
-    f.host(now(), true);
-    f.start();
-    f.wait(|s| s.network.is_none());
-    let boot = "12345678-1234-1234-1234-123456789abc";
-    let report = |stamp, rx| format!("N1 {stamp} {boot} 1:{rx}:200");
-    f.raw(
-        "network",
-        "1/uuid-1",
-        "a",
-        now(),
-        report(1_000_000_000_u64, 100).as_bytes(),
-    );
-    // A new host timestamp acknowledges a rescan of the baseline file.
-    let ack = now();
-    f.host(ack, true);
-    f.wait(|s| (s.timestamp - ack).abs() < 0.00001);
-    f.raw(
-        "network",
-        "1/uuid-1",
-        "a",
-        now(),
-        report(1_500_000_000_u64, 600).as_bytes(),
-    );
-    f.wait(|s| s.network == Some((1000.0, 0.0)));
-    f.raw(
-        "network",
-        "1/uuid-1",
-        "b",
-        now(),
-        report(2_000_000_000_u64, 1100).as_bytes(),
-    );
-    f.wait(|s| s.network.is_none());
-    f.raw(
-        "network",
-        "1/uuid-1",
-        "b",
-        now(),
-        report(2_500_000_000_u64, 1600).as_bytes(),
-    );
-    f.wait(|s| s.network == Some((1000.0, 0.0)));
-    f.write("raw/network", &vec![b'x'; 70 * 1024]);
-    f.wait(|s| s.network.is_none());
-    f.raw("memory-1", "1/uuid-1", "a", now(), &[0xff, 0, 0x1b]);
-    f.wait(|s| s.unknown == 1000);
-    f.raw("memory-1", "1/uuid-1", "a", now(), b"M2 1 1000 400 500 125");
-    f.wait(|s| s.used == 700);
-    f.stop();
-}
-
-#[test]
-fn slow_collector_intervals_keep_guest_reports_fresh_between_ticks() {
-    let mut f = Fixture::new();
-    f.host_period(now(), true, 10.0);
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "a",
-        now() - 6.0,
-        b"M2 1 1000 400 500 125",
-    );
-    f.start();
-    f.wait(|s| s.used == 700);
-    // Reports older than the interval's freshness window remain unavailable.
-    f.raw(
-        "memory-1",
-        "1/uuid-1",
-        "a",
-        now() - 41.0,
-        b"M2 1 1000 400 500 125",
-    );
-    f.wait(|s| s.unknown == 1000);
+    assert!(!f.path.join("metrics").exists());
+    let stamp = f.begin(&[], 0.1, false);
+    f.wait(stamp);
     f.stop();
 }

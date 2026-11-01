@@ -193,9 +193,15 @@ impl Reporters {
                 Err(error) => eprintln!("Cannot start guest reporter: {error}"),
             }
         }
-        for (_, reader) in self.readers.values() {
-            reader.request();
+    }
+    fn request(&self, tick_id: &str) -> BTreeMap<String, String> {
+        let mut expected = BTreeMap::new();
+        for (file, (identity, reader)) in &self.readers {
+            if reader.request(tick_id) {
+                expected.insert(file.clone(), format!("{}/{}", identity.id, identity.uuid));
+            }
         }
+        expected
     }
 }
 impl Drop for Reporters {
@@ -254,12 +260,26 @@ pub fn run(options: Options) -> Result<(), String> {
     let raw_directory = parent.join("raw");
     fs::create_dir_all(&raw_directory).map_err(|e| e.to_string())?;
     let mut reporters = Reporters::new(raw_directory);
+    let instance = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    );
+    let mut sequence = 0_u64;
     while !shutdown.requested() {
-        let tick = Instant::now();
+        let tick_started = Instant::now();
+        let deadline = multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?
+            + handoff::TICK_WAIT_SECONDS;
+        sequence += 1;
+        let tick_id = format!("{instance}/{sequence}");
         let result = (|| {
             let host = xen.sample()?;
             let cpu_usage = cpu.update(&host, start.elapsed());
             reporters.sync(&host, options.memory, options.network.as_deref());
+            let expected = reporters.request(&tick_id);
             let readings = BTreeMap::new();
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
             let dom0 = protocol::dom0_memory(&meminfo)?;
@@ -274,6 +294,11 @@ pub fn run(options: Options) -> Result<(), String> {
             data.disk = disk.sample(start.elapsed());
             let metrics = data.encode().map_err(|e| e.to_string())?;
             let frame = handoff::HostFrame {
+                tick: handoff::Tick {
+                    tick_id,
+                    deadline,
+                    expected,
+                },
                 host: host.clone(),
                 metrics,
                 memory_enabled: options.memory,
@@ -295,7 +320,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
         }
-        while !shutdown.requested() && tick.elapsed().as_secs_f64() < options.interval {
+        while !shutdown.requested() && tick_started.elapsed().as_secs_f64() < options.interval {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -483,9 +508,11 @@ mod tests {
         };
         let mut h = host();
         pool.sync(&h, true, None);
+        pool.request("test-tick");
         assert_eq!(pool.readers.len(), 1);
         let deadline = Instant::now() + Duration::from_secs(3);
         let frame = loop {
+            pool.request("test-tick");
             if let Ok(bytes) = fs::read(directory.join("memory-1")) {
                 break serde_json::from_slice::<handoff::RawFrame>(&bytes).unwrap();
             }
@@ -495,12 +522,14 @@ mod tests {
         assert_eq!(frame.payload, b"not a metric: \xff");
         assert_eq!(frame.identity, "1/uuid-1");
         pool.sync(&h, true, None);
+        pool.request("test-tick");
         let same: handoff::RawFrame =
             serde_json::from_slice(&fs::read(directory.join("memory-1")).unwrap()).unwrap();
         assert_eq!(same.session, frame.session);
         fs::write(directory.join(".metrics-in-progress"), b"temporary").unwrap();
         h.domains[1].identity = "replacement".into();
         pool.sync(&h, true, None);
+        pool.request("test-tick");
         assert!(directory.join(".metrics-in-progress").exists());
         let deadline = Instant::now() + Duration::from_secs(3);
         while pool
@@ -511,18 +540,22 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
             pool.sync(&h, true, None);
+            pool.request("test-tick");
         }
         h.domains[1].paused = true;
         pool.sync(&h, true, None);
+        pool.request("test-tick");
         assert!(pool.readers.len() + pool.retired.len() <= 1);
         let deadline = Instant::now() + Duration::from_secs(3);
         while !pool.readers.contains_key("memory-2") {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
             pool.sync(&h, true, None);
+            pool.request("test-tick");
         }
         h.domains.clear();
         pool.sync(&h, true, None);
+        pool.request("test-tick");
         assert!(pool.readers.is_empty());
         drop(pool);
         fs::remove_dir_all(directory).unwrap();
