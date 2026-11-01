@@ -1,5 +1,5 @@
 //! Opaque libxenstat/XenStore handles: no Xen-version-specific struct layouts.
-use super::{Domain, Host};
+use crate::metrics::{Domain, Host};
 use libloading::os::unix::{Library as UnixLibrary, RTLD_LOCAL, RTLD_NOW};
 use libloading::Library;
 use std::ffi::{c_char, c_uint, c_ulong, c_ulonglong, c_void, CStr, CString};

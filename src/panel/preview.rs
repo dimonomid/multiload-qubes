@@ -1,12 +1,12 @@
 //! Standalone demo, renderer artifacts, and isolated GTK integration checks.
+use super::charts::ChartKind;
+use super::palette::BuiltinTheme;
 use super::{
     config::{Appearance, Config, Selection},
     preferences::Preferences,
     themes::ThemeStore,
-    Panel,
+    Graphs, Panel,
 };
-use crate::charts::ChartKind;
-use crate::palette::BuiltinTheme;
 use clap::Parser;
 use gtk::prelude::*;
 use std::{cell::Cell, path::PathBuf, process::ExitCode, rc::Rc};
@@ -45,20 +45,13 @@ pub fn run() -> ExitCode {
         );
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).unwrap();
         let context = cairo::Context::new(&surface).unwrap();
-        let mut graphs = crate::Graphs::new();
+        let mut graphs = Graphs::new();
         graphs.set_history_width(width / ChartKind::COUNT as i32);
         graphs.palette = Appearance::builtin(theme).palettes;
         for _ in 0..400 {
             graphs.update(true);
         }
-        super::draw_graphs(
-            &graphs,
-            &context,
-            width,
-            height,
-            &crate::charts::ChartKind::ALL,
-            false,
-        );
+        super::draw_graphs(&graphs, &context, width, height, &ChartKind::ALL, false);
         return match std::fs::File::create(path)
             .map_err(|e| e.to_string())
             .and_then(|mut file| surface.write_to_png(&mut file).map_err(|e| e.to_string()))
@@ -514,7 +507,7 @@ fn self_test() {
 }
 fn renderer_test() {
     for kind in ChartKind::ALL {
-        let mut graphs = crate::Graphs::new();
+        let mut graphs = Graphs::new();
         graphs.palette[kind.index()].colors.fill(0);
         graphs.palette[kind.index()].colors[0] = 0xFF000080;
         graphs.palette[kind.index()].border = 3;

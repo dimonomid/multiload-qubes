@@ -4,9 +4,9 @@
 //! they must not look like measured zero usage.
 mod domain_graph;
 mod input;
-use crate::charts::ChartKind;
-use crate::palette::source;
-use crate::palette::Palette;
+use super::charts::ChartKind;
+use super::palette::source;
+use super::palette::Palette;
 use domain_graph::Metric;
 pub(crate) use input::Version as InputVersion;
 
@@ -32,7 +32,7 @@ impl Graphs {
             tick: 0,
             palette: std::array::from_fn(|kind| {
                 Palette::preset(
-                    crate::palette::BuiltinTheme::default(),
+                    super::palette::BuiltinTheme::default(),
                     ChartKind::ALL[kind],
                 )
             }),
@@ -248,7 +248,7 @@ impl Graphs {
             };
             rect(
                 cr,
-                crate::palette::mix(palette.colors[1], palette.colors[2], t),
+                super::palette::mix(palette.colors[1], palette.colors[2], t),
                 1.0,
                 y as f64,
                 w - 2.0,

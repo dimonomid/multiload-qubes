@@ -136,7 +136,11 @@ mod tests {
         )
         .unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "graphs::input::tests::fifo_child", "--ignored"])
+            .args([
+                "--exact",
+                "panel::graphs::input::tests::fifo_child",
+                "--ignored",
+            ])
             .env("MQ_FIFO_TEST", dir.metrics())
             .stdout(Stdio::null())
             .spawn()

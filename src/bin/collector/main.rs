@@ -1,5 +1,8 @@
-#[path = "../collector/mod.rs"]
-mod collector;
+mod diagnostics;
+mod disk;
+mod runtime;
+mod stream;
+mod xen;
 use multiload_qubes::metrics;
 
 use clap::Parser;
@@ -49,7 +52,7 @@ fn parse_qube(value: &str) -> Result<String, String> {
     Ok(value.into())
 }
 
-impl From<Cli> for collector::Options {
+impl From<Cli> for runtime::Options {
     fn from(cli: Cli) -> Self {
         Self {
             once: cli.once,
@@ -62,7 +65,7 @@ impl From<Cli> for collector::Options {
 }
 
 fn main() {
-    if let Err(error) = collector::run(Cli::parse().into()) {
+    if let Err(error) = runtime::run(Cli::parse().into()) {
         eprintln!("multiload-qubes-collector: {error}");
         std::process::exit(1);
     }
@@ -73,7 +76,7 @@ mod tests {
     use super::*;
     use clap::error::ErrorKind;
 
-    fn parse(args: &[&str]) -> Result<collector::Options, clap::Error> {
+    fn parse(args: &[&str]) -> Result<runtime::Options, clap::Error> {
         Cli::try_parse_from(std::iter::once("collector").chain(args.iter().copied()))
             .map(Into::into)
     }

@@ -1,5 +1,6 @@
 //! Follow atomic metrics publications. The only live-data timer detects silence.
-use crate::{graphs::InputVersion, Graphs, Snapshot};
+use super::graphs::{Graphs, InputVersion};
+use crate::Snapshot;
 use glib::SourceId;
 use nix::errno::Errno;
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor};

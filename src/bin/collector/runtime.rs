@@ -2,14 +2,11 @@
 //!
 //! Transport workers publish bounded raw reports without interpreting measurements.
 //! The systemd parser service combines them under a dedicated, restricted account.
-mod diagnostics;
-mod disk;
-pub mod stream;
-pub mod xen;
+use super::{disk, stream, xen};
 
 use crate::metrics::{
-    eligible, handoff, protocol, publish, ram_snapshot, shutdown, snapshot, swap_snapshot, Domain,
-    Host, Identity, MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
+    eligible, handoff, protocol, publish, ram_snapshot, shutdown, snapshot, swap_snapshot, Host,
+    Identity, MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
 };
 use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
 use protocol::Kind;
@@ -332,6 +329,7 @@ pub fn run(options: Options) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::Domain;
     fn domain(id: u32) -> Domain {
         Domain {
             id,

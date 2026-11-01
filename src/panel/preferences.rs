@@ -3,13 +3,13 @@
 //! Color edits update the live panel as a preview. Apply saves panel settings;
 //! Cancel restores the old colors. Named theme files are saved separately and
 //! are not undone by Cancel.
+use super::charts::{ChartKind, CHARTS};
+use super::palette::BuiltinTheme;
 use super::{
     config::{Appearance, Selection},
     themes::{reserved_name, valid_name, ThemeStore, BUILTINS},
-    Panel,
+    Graphs, Panel,
 };
-use crate::charts::{ChartKind, CHARTS};
-use crate::palette::BuiltinTheme;
 use gtk::{prelude::*, ResponseType};
 use std::{
     cell::{Cell, RefCell},
@@ -36,7 +36,7 @@ pub(super) struct Preferences {
     pub(super) transparent: gtk::CheckButton,
     preview: gtk::DrawingArea,
     reset: gtk::Button,
-    demo: RefCell<crate::Graphs>,
+    demo: RefCell<Graphs>,
     pub(super) editor: RefCell<Appearance>,
     pub(super) store: RefCell<ThemeStore>,
     updating: Cell<bool>,
@@ -123,7 +123,7 @@ impl Preferences {
         }
         chart_list.select_row(chart_list.row_at_index(0).as_ref());
         available.select_row(available.row_at_index(0).as_ref());
-        let mut demo = crate::Graphs::new();
+        let mut demo = Graphs::new();
         demo.set_history_width(320);
         for _ in 0..400 {
             demo.update(true);

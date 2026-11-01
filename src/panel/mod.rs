@@ -1,14 +1,18 @@
 //! GTK3 panel runtime. Only XFCE-specific calls cross the small native adapter.
+mod charts;
 mod config;
 mod ffi;
+mod graphs;
+mod palette;
 mod preferences;
 pub(crate) mod preview;
 mod themes;
 mod updates;
 
-use crate::charts::ChartKind;
+use charts::ChartKind;
 use config::Config;
 use ffi::Host;
+use graphs::Graphs;
 use gtk::prelude::*;
 use std::{
     cell::{Cell, RefCell},
@@ -19,7 +23,7 @@ use std::{
 pub(super) struct Panel {
     host: Option<Host>,
     area: gtk::DrawingArea,
-    graphs: RefCell<crate::Graphs>,
+    graphs: RefCell<Graphs>,
     config: RefCell<Config>,
     vertical: Cell<bool>,
     timer: RefCell<Option<glib::SourceId>>,
@@ -34,7 +38,7 @@ impl Panel {
         let panel = Rc::new(Self {
             host,
             area: gtk::DrawingArea::new(),
-            graphs: RefCell::new(crate::Graphs::new()),
+            graphs: RefCell::new(Graphs::new()),
             config: RefCell::new(Config::default()),
             vertical: Cell::new(false),
             timer: RefCell::new(None),
@@ -250,7 +254,7 @@ impl Drop for Panel {
     }
 }
 fn draw_graphs(
-    g: &crate::Graphs,
+    g: &Graphs,
     cr: &gtk::cairo::Context,
     width: i32,
     height: i32,

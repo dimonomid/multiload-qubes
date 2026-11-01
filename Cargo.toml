@@ -26,11 +26,11 @@ crate-type = ["staticlib", "rlib"]
 
 [[bin]]
 name = "multiload-qubes-collector"
-path = "src/bin/collector.rs"
+path = "src/bin/collector/main.rs"
 
 [[bin]]
 name = "multiload-qubes-parser"
-path = "src/bin/parser.rs"
+path = "src/bin/parser/main.rs"
 
 [[bin]]
 name = "multiload-qubes-preview"

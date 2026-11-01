@@ -20,7 +20,7 @@ PANEL_HEADER = build/panel-api.h
 .PHONY: all test check gui-test install rpm clean
 all: build/libmultiload-qubes.so build/multiload-qubes-preview $(COLLECTOR) $(PARSER)
 
-$(RUSTLIB) $(COLLECTOR) $(PARSER) $(PREVIEW) $(PANEL_HEADER) &: build.rs cbindgen.toml Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/collector/*.rs src/metrics/*.rs src/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
+$(RUSTLIB) $(COLLECTOR) $(PARSER) $(PREVIEW) $(PANEL_HEADER) &: build.rs cbindgen.toml Cargo.toml Cargo.lock snapshot/Cargo.toml $(wildcard src/*.rs src/bin/*.rs src/bin/*/*.rs src/metrics/*.rs src/panel/graphs/*.rs src/panel/*.rs guest/*.py snapshot/src/*.rs) | build
 	$(CARGO) build --release --offline --no-default-features --bin multiload-qubes-collector --bin multiload-qubes-parser
 	$(CARGO) build --release --offline --features panel --lib --bin multiload-qubes-preview
 	cp target/release/libmultiload_qubes.a $(RUSTLIB)

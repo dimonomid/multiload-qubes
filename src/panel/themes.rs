@@ -1,7 +1,7 @@
 //! Versioned GLib key files shared by panel instances. No GTK widgets here.
+use super::charts::{ChartKind, CHARTS};
 use super::config::Palettes;
-use crate::charts::{ChartKind, CHARTS};
-use crate::palette::BuiltinTheme;
+use super::palette::BuiltinTheme;
 use gio::prelude::*;
 use glib::KeyFile;
 use std::{fs, io::Read, os::unix::fs::DirBuilderExt, path::PathBuf};
@@ -64,7 +64,7 @@ impl SavedTheme {
             return Err("Invalid or reserved theme name".into());
         }
         let mut palettes = std::array::from_fn(|k| {
-            crate::palette::Palette::preset(BuiltinTheme::Original, ChartKind::ALL[k])
+            super::palette::Palette::preset(BuiltinTheme::Original, ChartKind::ALL[k])
         });
         for chart in &CHARTS {
             let k = chart.kind.index();

@@ -1,6 +1,5 @@
 use multiload_qubes::metrics;
-#[path = "../parser.rs"]
-mod parser;
+mod runtime;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -20,7 +19,7 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    if let Err(error) = parser::run(parser::Options {
+    if let Err(error) = runtime::run(runtime::Options {
         input: cli.input,
         output: cli.output,
     }) {

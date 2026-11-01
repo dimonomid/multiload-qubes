@@ -2,9 +2,9 @@
 //!
 //! The panel keeps its own copy of the colors, even for a named theme. A draft
 //! also keeps its starting colors so we can tell whether it has unsaved edits.
+use super::charts::{ChartKind, CHARTS};
+use super::palette::{BuiltinTheme, Palette};
 use super::themes::ThemeStore;
-use crate::charts::{ChartKind, CHARTS};
-use crate::palette::{BuiltinTheme, Palette};
 use glib::KeyFile;
 use std::path::Path;
 

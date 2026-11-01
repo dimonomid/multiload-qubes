@@ -31,8 +31,8 @@ const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
 const REPORTS_PER_SECOND: f64 = 4.0;
 const REPORT_BURST: f64 = 8.0;
 
-pub const METRICS_SCRIPT: &str = include_str!("../../guest/metrics.py");
-pub const NETWORK_SCRIPT: &str = include_str!("../../guest/network.py");
+pub const METRICS_SCRIPT: &str = include_str!("../../../guest/metrics.py");
+pub const NETWORK_SCRIPT: &str = include_str!("../../../guest/network.py");
 
 pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))

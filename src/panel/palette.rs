@@ -1,6 +1,6 @@
 //! Renderer palettes with packed RRGGBBAA colors.
 
-use crate::charts::ChartKind;
+use super::charts::ChartKind;
 
 // Built-in IDs persisted in panel settings.
 // Custom draft uses ID 1000 and is not a built-in palette.
