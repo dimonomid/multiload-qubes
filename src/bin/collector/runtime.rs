@@ -338,9 +338,9 @@ pub fn run(options: Options) -> Result<(), String> {
         if let Err(error) = result {
             eprintln!("Cannot collect metrics: {error}");
         }
-        while !shutdown.requested() && tick_started.elapsed() < options.interval {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        shutdown
+            .wait_until(tick_started + options.interval)
+            .map_err(|e| format!("Cannot wait for next collection tick: {e}"))?;
     }
     drop(reporters);
     Ok(())
