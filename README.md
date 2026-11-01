@@ -110,7 +110,7 @@ guest-controlled data in dom0.
 First you need the RPM package either download a pre-built one, or build it
 manually as explained below.
 
-Before copying a pre-built RPM to dom0, verify it in a regular qube using
+Optional but recommended step: before copying a pre-built RPM to dom0, verify it in a regular qube using
 [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/).
 Keep its original filename and place its matching `.sigstore.json` file beside it:
 
@@ -124,7 +124,7 @@ cosign verify-blob multiload-qubes-0.1.0-1.fc37.x86_64.rpm \
 Adjust the filename for your release. This is a separate signature check;
 `dnf` does not verify these Sigstore signatures itself.
 
-With the `multiload-qubes.rpm` already in dom0, run in dom0:
+With the `multiload-qubes.rpm` already in dom0, run in dom0 (adjust the filename):
 
 ```bash
 sudo dnf install ~/multiload-qubes.rpm
