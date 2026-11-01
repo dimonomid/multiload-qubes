@@ -105,7 +105,7 @@ type NetworkFrame = (u64, String, BTreeMap<u64, (u64, u64)>);
 /// State for one reporter connection; only network reports need a previous sample.
 pub struct Tracker {
     // The key chooses the format and expected domain ID. The parser checks
-    // UUID/session changes separately and replaces the tracker when they change.
+    // VM path/session changes separately and replaces the tracker when they change.
     key: ReporterKey,
     /// Last valid network counters, also replaced when a reset prevents a rate.
     previous: Option<NetworkFrame>,

@@ -567,7 +567,7 @@ mod tests {
             frame.identity,
             QubeIdentity {
                 domain_id: 1,
-                uuid: "uuid-1".into()
+                vm_path: "uuid-1".into()
             }
         );
         pool.sync(&h, true, None);
@@ -584,7 +584,7 @@ mod tests {
         while pool
             .readers
             .get(&ReporterKey::QubeMetrics(1))
-            .is_none_or(|(key, _)| key.identity.uuid != "replacement")
+            .is_none_or(|(key, _)| key.identity.vm_path != "replacement")
         {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));

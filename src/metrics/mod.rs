@@ -47,20 +47,20 @@ pub struct Domain {
 pub struct QubeIdentity {
     /// Xen domain ID observed alongside the VM identity.
     pub domain_id: u32,
-    /// VM identity from XenStore, commonly /vm/<uuid>.
-    pub uuid: String,
+    /// XenStore VM path, commonly /vm/<uuid>.
+    pub vm_path: String,
 }
 impl QubeIdentity {
     /// Chart history uses text keys; report matching uses the fields directly.
     pub fn chart_id(&self) -> String {
-        format!("{}/{}", self.domain_id, self.uuid)
+        format!("{}/{}", self.domain_id, self.vm_path)
     }
 }
 impl Domain {
     pub fn qube_identity(&self) -> QubeIdentity {
         QubeIdentity {
             domain_id: self.id,
-            uuid: self.identity.clone(),
+            vm_path: self.identity.clone(),
         }
     }
 }

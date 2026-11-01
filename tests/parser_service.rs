@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-fn identity(domain_id: u32, uuid: &str) -> QubeIdentity {
+fn identity(domain_id: u32, vm_path: &str) -> QubeIdentity {
     QubeIdentity {
         domain_id,
-        uuid: uuid.into(),
+        vm_path: vm_path.into(),
     }
 }
 

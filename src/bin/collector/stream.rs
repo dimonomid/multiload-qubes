@@ -685,7 +685,7 @@ mod tests {
                 path: self.0.join("raw"),
                 identity: QubeIdentity {
                     domain_id: 23,
-                    uuid: "test".into(),
+                    vm_path: "test".into(),
                 },
             }
         }
@@ -749,7 +749,7 @@ mod tests {
             first.identity,
             QubeIdentity {
                 domain_id: 23,
-                uuid: "test".into()
+                vm_path: "test".into()
             }
         );
         assert!(!first.session.is_empty());
@@ -879,7 +879,7 @@ mod tests {
                 path: target.clone(),
                 identity: QubeIdentity {
                     domain_id: 23,
-                    uuid: "test".into(),
+                    vm_path: "test".into(),
                 },
             },
         )
@@ -946,7 +946,7 @@ mod tests {
                 path: attempts.0.join("raw"),
                 identity: QubeIdentity {
                     domain_id: 23,
-                    uuid: "test".into(),
+                    vm_path: "test".into(),
                 },
             },
         )
