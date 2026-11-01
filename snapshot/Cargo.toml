@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-or-later"
 publish = false
-description = "Shared MQ1/MQ2 snapshot contract for Multiload for Qubes"
+description = "Shared MQ6 snapshot contract for Multiload for Qubes"

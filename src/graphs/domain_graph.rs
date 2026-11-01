@@ -29,7 +29,7 @@ impl Metric {
 pub(crate) fn tooltip(usage: Option<&DomainUsageSnapshot>, metric: Metric) -> String {
     let label = metric.label();
     let Some(usage) = usage else {
-        return format!("{label}: unavailable (legacy collector)");
+        return format!("{label}: unavailable");
     };
     let total: u128 = usage.entries.iter().map(|e| e.total as u128).sum();
     let used: u128 = usage.entries.iter().map(|e| e.used as u128).sum();

@@ -138,7 +138,7 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; ChartKind::COUNT]
                     disk.devices.join(", ")
                 )
             }
-            None => "Disk: unavailable (collection failure or legacy collector)".into(),
+            None => "Disk: unavailable".into(),
         };
         ChartKind::ALL.map(|kind| match kind {
             ChartKind::Cpu => format!("CPU: {cpu}\n100% = all host logical CPUs busy."),

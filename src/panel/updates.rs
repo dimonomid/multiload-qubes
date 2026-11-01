@@ -253,7 +253,7 @@ mod tests {
             let now = multiload_qubes_snapshot::unix_time_now().unwrap();
             crate::metrics::publish(
                 &self.metrics(),
-                &format!("MQ2 {now:.6} 25 4000 2000 100 1000 0 0.25 unknown unknown\n"),
+                &format!("MQ6 {now:.6} 25 4000 2000 100 1000 0 0.25 unknown unknown unknown - unknown unknown unknown unknown - unknown unknown unknown -\n"),
             )
             .unwrap();
         }

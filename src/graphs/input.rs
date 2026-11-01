@@ -83,7 +83,7 @@ mod tests {
     fn reads_a_valid_snapshot_and_accepts_atomic_replacement() {
         let dir = Directory::new();
         let now = multiload_qubes_snapshot::unix_time_now().unwrap();
-        let wire = format!("MQ2 {now:.6} 25 4000 2000 100 1000 0 0.5 unknown unknown\n");
+        let wire = format!("MQ6 {now:.6} 25 4000 2000 100 1000 0 0.5 unknown unknown unknown - unknown unknown unknown unknown - unknown unknown unknown -\n");
         fs::write(dir.metrics(), &wire).unwrap();
         let snapshot = crate::Snapshot::decode_fresh(&read(&dir.metrics()).unwrap()).unwrap();
         assert_eq!(snapshot.cpu, Some(25.0));

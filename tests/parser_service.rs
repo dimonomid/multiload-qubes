@@ -51,7 +51,7 @@ impl Fixture {
         let expected: std::collections::BTreeMap<_, _> =
             expected.iter().map(|file| (*file, "1/uuid-1")).collect();
         let metrics =
-            format!("MQ2 {timestamp:.6} 25 4000 2000 100 1000 0 {period} unknown unknown\n");
+            format!("MQ6 {timestamp:.6} 25 4000 2000 100 1000 0 {period} unknown unknown unknown - unknown unknown unknown unknown - unknown unknown unknown -\n");
         let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline":now()+wait,"expected":expected},"host":{"total":4000,"free":2000,"cpus":4,"domains":[domain(0),domain(1)]},"metrics":metrics,"memory_enabled":memory,"network_identity":"1/uuid-1","dom0_ram":[1000,100],"dom0_swap":[100,50]});
         self.write("host.json", &serde_json::to_vec(&frame).unwrap());
         timestamp

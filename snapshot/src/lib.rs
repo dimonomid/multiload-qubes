@@ -104,9 +104,9 @@ pub struct Snapshot {
     pub period: f64,
     /// Incoming and outgoing bytes/second, or unavailable/warming up.
     pub network: Option<(f64, f64)>,
-    /// Per-domain swap, absent in legacy snapshots. All quantities are KiB.
+    /// Per-domain swap, or unavailable. All quantities are KiB.
     pub swap: Option<DomainUsageSnapshot>,
-    /// Physical block-device activity in dom0, absent when unavailable or legacy.
+    /// Physical block-device activity in dom0, or unavailable.
     pub disk: Option<DiskSnapshot>,
     /// Current guest-visible RAM totals and usage, including dom0, in KiB.
     pub qube_ram: Option<DomainUsageSnapshot>,
@@ -124,7 +124,7 @@ impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => write!(f, "snapshot exceeds {MAX_WIRE_BYTES} bytes"),
-            Self::InvalidFormat => write!(f, "invalid MQ1/MQ2/MQ3/MQ4/MQ5/MQ6 snapshot format"),
+            Self::InvalidFormat => write!(f, "invalid MQ6 snapshot format"),
             Self::InvalidField(field) => write!(f, "invalid snapshot field: {field}"),
             Self::Stale => write!(f, "snapshot is stale or too far in the future"),
         }
@@ -313,137 +313,89 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Write MQ6 for per-domain CPU, otherwise preserve earlier layouts.
+    /// Every metric has a fixed position, including when it is unavailable.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
             .cpu
             .map_or_else(|| "unknown".into(), |v| format!("{v:.4}"));
         let network = encode_rates(self.network);
-        let version = if self.qube_cpu.is_some() {
-            "MQ6"
-        } else if self.qube_ram.is_some() {
-            "MQ5"
-        } else if self.disk.is_some() {
-            "MQ4"
-        } else if self.swap.is_some() {
-            "MQ3"
-        } else {
-            "MQ2"
-        };
-        let mut line = format!(
-            "{version} {:.6} {cpu} {} {} {} {} {} {} {network}",
+        let disk = self.disk.as_ref().map_or_else(
+            || "unknown unknown unknown".into(),
+            |disk| {
+                let devices = if disk.devices.is_empty() {
+                    "-".into()
+                } else {
+                    disk.devices.join(",")
+                };
+                format!("{} {devices}", encode_rates(disk.rates))
+            },
+        );
+        let qube_cpu = self.qube_cpu.as_ref().map_or_else(
+            || "unknown unknown unknown -".into(),
+            |cpu| {
+                format!(
+                    "{} {} {}",
+                    cpu.window_ns,
+                    cpu.host_cpus,
+                    encode_domains(Some(&cpu.usage))
+                )
+            },
+        );
+        let line = format!(
+            "MQ6 {:.6} {cpu} {} {} {} {} {} {} {network} {} {disk} {} {qube_cpu}\n",
             self.timestamp,
             self.total,
             self.allocated,
             self.used,
             self.unknown,
             self.overhead,
-            self.period
+            self.period,
+            encode_domains(self.swap.as_ref()),
+            encode_domains(self.qube_ram.as_ref()),
         );
-        // Fields have fixed positions. Newer versions need placeholders for
-        // missing earlier metrics, or the reader would read the wrong columns.
-        if version != "MQ2" {
-            line.push_str(&format!(" {}", encode_domains(self.swap.as_ref())));
-        }
-        if let Some(disk) = &self.disk {
-            let devices = if disk.devices.is_empty() {
-                "-".into()
-            } else {
-                disk.devices.join(",")
-            };
-            line.push_str(&format!(" {} {devices}", encode_rates(disk.rates)));
-        } else if matches!(version, "MQ5" | "MQ6") {
-            line.push_str(" unknown unknown unknown");
-        }
-        if let Some(ram) = &self.qube_ram {
-            line.push_str(&format!(" {}", encode_domains(Some(ram))));
-        }
-        if let Some(cpu) = &self.qube_cpu {
-            if self.qube_ram.is_none() {
-                line.push_str(" unknown -");
-            }
-            line.push_str(&format!(
-                " {} {} {}",
-                cpu.window_ns,
-                cpu.host_cpus,
-                encode_domains(Some(&cpu.usage))
-            ));
-        }
-        line.push('\n');
         if line.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
         }
         Ok(line)
     }
 
-    /// Decode all supported versions. Historical data is permitted; readers check freshness.
+    /// Decode MQ6. Readers check freshness separately.
     pub fn decode(text: &str) -> Result<Self, SnapshotError> {
         if text.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
         }
         let p: Vec<_> = text.split_whitespace().collect();
-        if !((p.len() == 9 && p[0] == "MQ1")
-            || (p.len() == 11 && p[0] == "MQ2")
-            || (p.len() == 13 && p[0] == "MQ3")
-            || (p.len() == 16 && p[0] == "MQ4")
-            || (p.len() == 18 && p[0] == "MQ5")
-            || (p.len() == 22 && p[0] == "MQ6"))
-        {
+        if p.len() != 22 || p[0] != "MQ6" {
             return Err(SnapshotError::InvalidFormat);
         }
-        let network = if p[0] == "MQ1" {
-            None
-        } else {
-            decode_rates(p[9], p[10])?
-        };
-        let swap = if matches!(p[0], "MQ3" | "MQ4" | "MQ5" | "MQ6") {
-            let value = decode_domains(p[11], p[12])?;
-            if p[0] == "MQ3" && value.is_none() {
-                return Err(SnapshotError::InvalidField("swap coverage"));
+        let network = decode_rates(p[9], p[10])?;
+        let swap = decode_domains(p[11], p[12])?;
+        let disk_rates = decode_rates(p[13], p[14])?;
+        let disk = if p[15] == "unknown" {
+            if disk_rates.is_some() {
+                return Err(SnapshotError::InvalidField("unknown disk rates"));
             }
-            value
-        } else {
             None
-        };
-        let disk = if matches!(p[0], "MQ4" | "MQ5" | "MQ6") {
-            let rates = decode_rates(p[13], p[14])?;
-            if matches!(p[0], "MQ5" | "MQ6") && p[15] == "unknown" {
-                if rates.is_some() {
-                    return Err(SnapshotError::InvalidField("unknown disk rates"));
-                }
-                None
-            } else {
-                Some(DiskSnapshot {
-                    rates,
-                    devices: if p[15] == "-" {
-                        Vec::new()
-                    } else {
-                        p[15].split(',').map(str::to_owned).collect()
-                    },
-                })
-            }
         } else {
-            None
-        };
-        let qube_ram = if matches!(p[0], "MQ5" | "MQ6") {
-            let ram = decode_domains(p[16], p[17])?;
-            if p[0] == "MQ5" && ram.is_none() {
-                return Err(SnapshotError::InvalidField("RAM coverage"));
-            }
-            ram
-        } else {
-            None
-        };
-        let qube_cpu = if p[0] == "MQ6" {
-            Some(DomainCpuSnapshot {
-                window_ns: field(p[18], "CPU sampling window ns")?,
-                host_cpus: field(p[19], "host logical CPU count")?,
-                usage: decode_domains(p[20], p[21])?
-                    .ok_or(SnapshotError::InvalidField("CPU coverage"))?,
+            Some(DiskSnapshot {
+                rates: disk_rates,
+                devices: if p[15] == "-" {
+                    Vec::new()
+                } else {
+                    p[15].split(',').map(str::to_owned).collect()
+                },
             })
-        } else {
-            None
+        };
+        let qube_ram = decode_domains(p[16], p[17])?;
+        let qube_cpu = match (p[18], p[19], decode_domains(p[20], p[21])?) {
+            ("unknown", "unknown", None) => None,
+            (window, cpus, Some(usage)) => Some(DomainCpuSnapshot {
+                window_ns: field(window, "CPU sampling window ns")?,
+                host_cpus: field(cpus, "host logical CPU count")?,
+                usage,
+            }),
+            _ => return Err(SnapshotError::InvalidField("CPU coverage")),
         };
         let snapshot = Self {
             timestamp: field(p[1], "timestamp")?,
@@ -489,14 +441,23 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const MQ2: &str = "MQ2 1000.500000 42.5000 32000 24000 10000 2000 1000 1 1024.500 2048.250\n";
+    const MQ6: &str = "MQ6 1000.500000 42.5000 32000 24000 10000 2000 1000 1 1024.500 2048.250 unknown - unknown unknown unknown unknown - unknown unknown unknown -\n";
+
+    fn with_fields(range: std::ops::Range<usize>, fields: &str) -> String {
+        let parts: Vec<_> = MQ6.split_whitespace().collect();
+        format!(
+            "{} {fields} {}\n",
+            parts[..range.start].join(" "),
+            parts[range.end..].join(" ")
+        )
+    }
 
     #[test]
-    fn mq2_round_trip_preserves_wire_contract() {
-        let snapshot = Snapshot::decode(MQ2).unwrap();
+    fn round_trip_preserves_wire_contract() {
+        let snapshot = Snapshot::decode(MQ6).unwrap();
         assert_eq!(snapshot.timestamp, 1000.5);
         assert_eq!(snapshot.network, Some((1024.5, 2048.25)));
-        assert_eq!(snapshot.encode().unwrap(), MQ2);
+        assert_eq!(snapshot.encode().unwrap(), MQ6);
         assert_eq!(
             Snapshot::decode(&snapshot.encode().unwrap()).unwrap(),
             snapshot
@@ -504,27 +465,26 @@ mod tests {
     }
 
     #[test]
-    fn accepts_legacy_mq1_and_unknown_metrics() {
-        let snapshot =
-            Snapshot::decode("MQ1 1000.5 unknown 32000 24000 10000 2000 1000 1").unwrap();
-        assert_eq!(snapshot.cpu, None);
-        assert_eq!(snapshot.network, None);
-        assert_eq!(
-            snapshot.encode().unwrap(),
-            "MQ2 1000.500000 unknown 32000 24000 10000 2000 1000 1 unknown unknown\n"
-        );
-        assert_eq!(
-            Snapshot::decode(&snapshot.encode().unwrap()).unwrap(),
-            snapshot
-        );
+    fn unavailable_metrics_keep_the_same_layout() {
+        let mut snapshot = Snapshot::decode(MQ6).unwrap();
+        snapshot.cpu = None;
+        snapshot.network = None;
+        let wire = snapshot.encode().unwrap();
+        assert!(wire.starts_with("MQ6 1000.500000 unknown "));
+        assert_eq!(wire.split_whitespace().count(), 22);
+        assert_eq!(Snapshot::decode(&wire).unwrap(), snapshot);
+        assert!(snapshot.swap.is_none());
+        assert!(snapshot.disk.is_none());
+        assert!(snapshot.qube_ram.is_none());
+        assert!(snapshot.qube_cpu.is_none());
     }
 
     #[test]
-    fn mq3_round_trip_peak_disabled_swap_and_missing_reports() {
-        let mut snapshot = Snapshot::decode(MQ2).unwrap();
-        let wire = format!(
-            "{} 4 dom0:dom0:0:0,1/vm-a:work:100:60,2/vm-b:dev:200:120\n",
-            MQ2.trim().replacen("MQ2", "MQ3", 1)
+    fn swap_round_trip_peak_disabled_swap_and_missing_reports() {
+        let mut snapshot = Snapshot::decode(MQ6).unwrap();
+        let wire = with_fields(
+            11..13,
+            "4 dom0:dom0:0:0,1/vm-a:work:100:60,2/vm-b:dev:200:120",
         );
         snapshot.swap = Some(DomainUsageSnapshot {
             expected: 4,
@@ -566,8 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn mq3_rejects_untrusted_labels_duplicates_and_invalid_totals() {
-        let base = MQ2.trim().replacen("MQ2", "MQ3", 1);
+    fn rejects_untrusted_labels_duplicates_and_invalid_totals() {
         for fields in [
             "0 dom0:dom0:1:0",
             "1 dom0:dom0:0:1",
@@ -583,7 +542,7 @@ mod tests {
             "1 dom0:dom0:10:0:extra",
         ] {
             assert!(
-                Snapshot::decode(&format!("{base} {fields}")).is_err(),
+                Snapshot::decode(&with_fields(11..13, fields)).is_err(),
                 "{fields}"
             );
         }
@@ -591,21 +550,26 @@ mod tests {
             .map(|i| format!("id{i}:qube{i}:10:1"))
             .collect::<Vec<_>>()
             .join(",");
-        assert!(Snapshot::decode(&format!("{base} 130 {entries}")).is_err());
-        assert!(Snapshot::decode(&format!("{base} 1 {}:work:10:1", "a".repeat(97))).is_err());
+        assert!(Snapshot::decode(&with_fields(
+            11..13,
+            &format!("{} {entries}", MAX_DOMAIN_ENTRIES + 1)
+        ))
+        .is_err());
+        assert!(Snapshot::decode(&with_fields(
+            11..13,
+            &format!("1 {}:work:10:1", "a".repeat(97))
+        ))
+        .is_err());
     }
 
     #[test]
-    fn mq4_round_trips_disk_rates_devices_and_unknown_swap() {
-        let mut s = Snapshot::decode(MQ2).unwrap();
+    fn disk_round_trip_rates_devices_and_unknown_swap() {
+        let mut s = Snapshot::decode(MQ6).unwrap();
         s.disk = Some(DiskSnapshot {
             devices: vec!["nvme0n1".into(), "sda".into()],
             rates: Some((1024.5, 2048.25)),
         });
-        let wire = format!(
-            "{} unknown - 1024.500 2048.250 nvme0n1,sda\n",
-            MQ2.trim().replacen("MQ2", "MQ4", 1)
-        );
+        let wire = with_fields(13..16, "1024.500 2048.250 nvme0n1,sda");
         assert_eq!(s.encode().unwrap(), wire);
         assert_eq!(Snapshot::decode(&wire).unwrap(), s);
         assert!(Snapshot::decode_fresh_at(&wire, 1005.5).is_ok());
@@ -623,12 +587,11 @@ mod tests {
         }
         s.disk.as_mut().unwrap().devices.clear();
         assert_eq!(Snapshot::decode(&s.encode().unwrap()).unwrap(), s);
-        assert!(Snapshot::decode(MQ2).unwrap().disk.is_none());
+        assert!(Snapshot::decode(MQ6).unwrap().disk.is_none());
     }
 
     #[test]
-    fn mq4_rejects_bad_disk_names_duplicates_counts_and_rates() {
-        let base = format!("{} unknown -", MQ2.trim().replacen("MQ2", "MQ4", 1));
+    fn rejects_bad_disk_names_duplicates_counts_and_rates() {
         for extension in [
             "NaN 1 sda",
             "1 inf sda",
@@ -645,7 +608,7 @@ mod tests {
             "0 0 sda extra",
         ] {
             assert!(
-                Snapshot::decode(&format!("{base} {extension}")).is_err(),
+                Snapshot::decode(&with_fields(13..16, extension)).is_err(),
                 "{extension}"
             );
         }
@@ -653,23 +616,22 @@ mod tests {
             .map(|i| format!("disk{i}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert!(Snapshot::decode(&format!("{base} 0 0 {many}")).is_err());
-        assert!(Snapshot::decode(&format!("{base} 0 0 {}", "a".repeat(64))).is_err());
-        let mut s = Snapshot::decode(MQ2).unwrap();
+        assert!(Snapshot::decode(&with_fields(13..16, &format!("0 0 {many}"))).is_err());
+        assert!(
+            Snapshot::decode(&with_fields(13..16, &format!("0 0 {}", "a".repeat(64)))).is_err()
+        );
+        let mut s = Snapshot::decode(MQ6).unwrap();
         s.disk = Some(DiskSnapshot {
             devices: vec!["sda".into()],
             rates: Some((f64::NAN, 0.0)),
         });
         assert!(s.encode().is_err());
-        assert!(Snapshot::decode(
-            &format!("{base} 0 0 sda").replace("unknown - 0", "unknown bad 0")
-        )
-        .is_err());
+        assert!(Snapshot::decode(&with_fields(11..13, "unknown bad")).is_err());
     }
 
     #[test]
-    fn mq5_preserves_ram_totals_and_optional_legacy_metrics() {
-        let mut s = Snapshot::decode(MQ2).unwrap();
+    fn ram_totals_and_unavailable_metrics_round_trip() {
+        let mut s = Snapshot::decode(MQ6).unwrap();
         s.qube_ram = Some(DomainUsageSnapshot {
             expected: 3,
             entries: vec![
@@ -688,7 +650,7 @@ mod tests {
             ],
         });
         let wire = s.encode().unwrap();
-        assert!(wire.starts_with("MQ5 "));
+        assert!(wire.starts_with("MQ6 "));
         assert!(wire.contains("unknown - unknown unknown unknown 3 dom0:dom0:1000:400"));
         assert_eq!(Snapshot::decode(&wire).unwrap(), s);
         assert_eq!(s.qube_ram.as_ref().unwrap().peak(), Some(80.0));
@@ -713,12 +675,12 @@ mod tests {
         assert!(Snapshot::decode(&bad).is_err());
         let bad = wire.replace(" 3 dom0:", " 1 dom0:");
         assert!(Snapshot::decode(&bad).is_err());
-        assert!(Snapshot::decode(MQ2).unwrap().qube_ram.is_none());
+        assert!(Snapshot::decode(MQ6).unwrap().qube_ram.is_none());
     }
 
     #[test]
-    fn mq5_bounds_two_full_domain_groups_and_rejects_duplicate_ram_identities() {
-        let mut s = Snapshot::decode(MQ2).unwrap();
+    fn bounds_full_domain_groups_and_rejects_duplicate_ram_identities() {
+        let mut s = Snapshot::decode(MQ6).unwrap();
         let group = DomainUsageSnapshot {
             expected: MAX_DOMAIN_ENTRIES as u32,
             entries: (0..MAX_DOMAIN_ENTRIES)
@@ -731,7 +693,17 @@ mod tests {
                 .collect(),
         };
         s.swap = Some(group.clone());
-        s.qube_ram = Some(group);
+        s.qube_ram = Some(group.clone());
+        let mut cpu_usage = group;
+        for entry in &mut cpu_usage.entries {
+            entry.total = 4_000_000_000;
+            entry.used = 2_000_000_000;
+        }
+        s.qube_cpu = Some(DomainCpuSnapshot {
+            window_ns: 1_000_000_000,
+            host_cpus: 16,
+            usage: cpu_usage,
+        });
         let wire = s.encode().unwrap();
         assert!(wire.len() > 32 * 1024 && wire.len() < MAX_WIRE_BYTES);
         assert_eq!(Snapshot::decode(&wire).unwrap(), s);
@@ -743,8 +715,8 @@ mod tests {
     }
 
     #[test]
-    fn mq6_preserves_cpu_time_budgets_vcpus_and_host_contribution() {
-        let mut s = Snapshot::decode(MQ2).unwrap();
+    fn cpu_time_budgets_vcpus_and_host_contribution_round_trip() {
+        let mut s = Snapshot::decode(MQ6).unwrap();
         s.qube_cpu = Some(DomainCpuSnapshot {
             window_ns: 1_000_000_000,
             host_cpus: 16,
@@ -793,26 +765,125 @@ mod tests {
     }
 
     #[test]
+    fn metric_availability_is_independent_in_one_fixed_layout() {
+        let mut full = Snapshot::decode(MQ6).unwrap();
+        let usage = DomainUsageSnapshot {
+            expected: 1,
+            entries: vec![DomainUsage {
+                id: "dom0".into(),
+                name: "dom0".into(),
+                total: 1000,
+                used: 400,
+            }],
+        };
+        full.swap = Some(usage.clone());
+        full.qube_ram = Some(usage);
+        full.disk = Some(DiskSnapshot {
+            devices: vec!["sda".into()],
+            rates: Some((0.0, 0.0)),
+        });
+        full.qube_cpu = Some(DomainCpuSnapshot {
+            window_ns: 1_000_000_000,
+            host_cpus: 4,
+            usage: DomainUsageSnapshot {
+                expected: 1,
+                entries: vec![DomainUsage {
+                    id: "dom0".into(),
+                    name: "dom0".into(),
+                    total: 2_000_000_000,
+                    used: 1_000_000_000,
+                }],
+            },
+        });
+        // Each metric can be absent without changing the positions of the others.
+        for available in 0..64 {
+            let mut s = full.clone();
+            if available & 1 == 0 {
+                s.cpu = None;
+            }
+            if available & 2 == 0 {
+                s.network = None;
+            }
+            if available & 4 == 0 {
+                s.swap = None;
+            }
+            if available & 8 == 0 {
+                s.disk = None;
+            }
+            if available & 16 == 0 {
+                s.qube_ram = None;
+            }
+            if available & 32 == 0 {
+                s.qube_cpu = None;
+            }
+            let wire = s.encode().unwrap();
+            assert!(wire.starts_with("MQ6 "));
+            assert_eq!(wire.split_whitespace().count(), 22);
+            assert_eq!(
+                Snapshot::decode(&wire).unwrap(),
+                s,
+                "availability mask {available}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_other_versions_and_partial_unavailable_fields() {
+        for version in ["MQ1", "MQ2", "MQ3", "MQ4", "MQ5", "MQ7"] {
+            assert_eq!(
+                Snapshot::decode(&MQ6.replacen("MQ6", version, 1)),
+                Err(SnapshotError::InvalidFormat)
+            );
+        }
+        // Old layouts with their original field counts are rejected too.
+        let fields: Vec<_> = MQ6.split_whitespace().collect();
+        for (version, count) in [
+            ("MQ1", 9),
+            ("MQ2", 11),
+            ("MQ3", 13),
+            ("MQ4", 16),
+            ("MQ5", 18),
+        ] {
+            let wire = format!("{version} {}", fields[1..count].join(" "));
+            assert_eq!(Snapshot::decode(&wire), Err(SnapshotError::InvalidFormat));
+        }
+        for (range, fields) in [
+            (9..11, "unknown 0"),
+            (11..13, "unknown dom0:dom0:0:0"),
+            (13..16, "0 0 unknown"),
+            (16..18, "unknown dom0:dom0:1000:400"),
+            (18..22, "1000000000 4 unknown -"),
+            (18..22, "unknown 4 unknown -"),
+            (18..22, "unknown unknown 1 dom0:dom0:1000000000:0"),
+        ] {
+            assert!(
+                Snapshot::decode(&with_fields(range, fields)).is_err(),
+                "{fields}"
+            );
+        }
+    }
+
+    #[test]
     fn freshness_is_separate_and_deterministic() {
-        assert!(Snapshot::decode(MQ2).is_ok());
-        assert!(Snapshot::decode_fresh_at(MQ2, 1005.5).is_ok());
+        assert!(Snapshot::decode(MQ6).is_ok());
+        assert!(Snapshot::decode_fresh_at(MQ6, 1005.5).is_ok());
         assert_eq!(
-            Snapshot::decode_fresh_at(MQ2, 1005.5001),
+            Snapshot::decode_fresh_at(MQ6, 1005.5001),
             Err(SnapshotError::Stale)
         );
-        assert!(Snapshot::decode_fresh_at(MQ2, 995.5).is_ok());
+        assert!(Snapshot::decode_fresh_at(MQ6, 995.5).is_ok());
         assert_eq!(
-            Snapshot::decode_fresh_at(MQ2, 995.4999),
+            Snapshot::decode_fresh_at(MQ6, 995.4999),
             Err(SnapshotError::Stale)
         );
-        let slow = MQ2.replace("1000 1 1024", "1000 10 1024");
+        let slow = MQ6.replace("1000 1 1024", "1000 10 1024");
         assert!(Snapshot::decode_fresh_at(&slow, 1040.5).is_ok());
         assert_eq!(
             Snapshot::decode_fresh_at(&slow, 1040.5001),
             Err(SnapshotError::Stale)
         );
         assert_eq!(
-            Snapshot::decode_fresh_at(MQ2, f64::NAN),
+            Snapshot::decode_fresh_at(MQ6, f64::NAN),
             Err(SnapshotError::Stale)
         );
     }
@@ -822,9 +893,9 @@ mod tests {
         for text in [
             "",
             "MQ3 1",
-            "MQ2 1",
-            &format!("{MQ2}extra"),
-            &MQ2.replace("24000", "-1"),
+            "MQ6 1",
+            &format!("{MQ6}extra"),
+            &MQ6.replace("24000", "-1"),
         ] {
             assert!(Snapshot::decode(text).is_err(), "accepted {text}");
         }
@@ -833,15 +904,15 @@ mod tests {
             Err(SnapshotError::TooLarge)
         );
         for text in [
-            MQ2.replace("1000.500000", "NaN"),
-            MQ2.replace("42.5000", "101"),
-            MQ2.replace("42.5000", "NaN"),
-            MQ2.replace(" 1 1024", " 0 1024"),
-            MQ2.replace(" 1 1024", " inf 1024"),
-            MQ2.replace("1024.500", "NaN"),
-            MQ2.replace("1024.500", "unknown"),
-            MQ2.replace("2048.250", "-1"),
-            MQ2.replace("2048.250", "1e16"),
+            MQ6.replace("1000.500000", "NaN"),
+            MQ6.replace("42.5000", "101"),
+            MQ6.replace("42.5000", "NaN"),
+            MQ6.replace(" 1 1024", " 0 1024"),
+            MQ6.replace(" 1 1024", " inf 1024"),
+            MQ6.replace("1024.500", "NaN"),
+            MQ6.replace("1024.500", "unknown"),
+            MQ6.replace("2048.250", "-1"),
+            MQ6.replace("2048.250", "1e16"),
         ] {
             assert!(Snapshot::decode(&text).is_err(), "accepted {text}");
         }
@@ -849,7 +920,7 @@ mod tests {
 
     #[test]
     fn encoder_and_decoder_share_accounting_validation() {
-        let valid = Snapshot::decode(MQ2).unwrap();
+        let valid = Snapshot::decode(MQ6).unwrap();
         let mut invalid = Vec::new();
         let mut s = valid.clone();
         s.total = 0;
@@ -879,7 +950,7 @@ mod tests {
             assert!(s.encode().is_err());
         }
         for accounting in ["0 0 0 0 0", "32 33 0 0 0", "32 24 10 20 0", "32 24 10 0 9"] {
-            assert!(Snapshot::decode(&format!("MQ1 1000 10 {accounting} 1")).is_err());
+            assert!(Snapshot::decode(&with_fields(3..8, accounting)).is_err());
         }
     }
 }
