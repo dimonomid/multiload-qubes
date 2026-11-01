@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Domain {
     pub id: u32,
+    /// XenStore VM identity, without a domain ID prefix.
     pub identity: String,
     pub name: String,
     pub cpu_ns: u64,
@@ -31,6 +32,29 @@ pub struct Domain {
     pub shutdown: bool,
     pub stubdom: Option<u32>,
 }
+/// Match both fields when associating a report with a qube. Xen can reuse a
+/// domain ID for another qube; the ID alone does not establish identity.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct QubeIdentity {
+    pub domain_id: u32,
+    /// VM identity from XenStore, commonly /vm/<uuid>.
+    pub uuid: String,
+}
+impl QubeIdentity {
+    /// Chart history uses text keys; report matching uses the fields directly.
+    pub fn chart_id(&self) -> String {
+        format!("{}/{}", self.domain_id, self.uuid)
+    }
+}
+impl Domain {
+    pub fn qube_identity(&self) -> QubeIdentity {
+        QubeIdentity {
+            domain_id: self.id,
+            uuid: self.identity.clone(),
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Host {
     pub total: u64,
@@ -135,13 +159,13 @@ impl HostSample {
     }
 }
 
+/// Name and identity used to manage a connection to an eligible qube.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Identity {
-    pub id: u32,
-    pub uuid: String,
+pub struct Qube {
+    pub identity: QubeIdentity,
     pub name: String,
 }
-pub fn eligible(host: &Host) -> BTreeMap<u32, Identity> {
+pub fn eligible(host: &Host) -> BTreeMap<u32, Qube> {
     // Stub domains run device models, not a normal guest reporter. Their RAM
     // still counts toward host allocation, but its used amount stays unknown.
     let stubs: BTreeSet<_> = host.domains.iter().filter_map(|d| d.stubdom).collect();
@@ -158,9 +182,8 @@ pub fn eligible(host: &Host) -> BTreeMap<u32, Identity> {
         .map(|d| {
             (
                 d.id,
-                Identity {
-                    id: d.id,
-                    uuid: d.identity.clone(),
+                Qube {
+                    identity: d.qube_identity(),
                     name: d.name.clone(),
                 },
             )
@@ -181,11 +204,11 @@ fn domain_snapshot(
         total: dom0.0,
         used: dom0.1,
     }];
-    for (id, key) in &active {
+    for (id, qube) in &active {
         if let Some((total, used)) = readings.get(id).copied().and_then(value) {
             entries.push(DomainUsage {
-                id: format!("{}/{}", id, key.uuid),
-                name: key.name.clone(),
+                id: qube.identity.chart_id(),
+                name: qube.name.clone(),
                 total,
                 used,
             });

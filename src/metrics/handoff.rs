@@ -1,5 +1,5 @@
 //! Root-owned files passed to the parser. Guest bytes never choose a path or identity.
-use super::{HostSample, ReporterKey};
+use super::{HostSample, QubeIdentity, ReporterKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -16,9 +16,9 @@ pub const TICK_WAIT_SECONDS: f64 = 0.1;
 pub struct Tick {
     pub tick_id: String,
     pub deadline: f64,
-    /// Accepted reporters mapped to their id/UUID strings. The map key alone
+    /// Accepted reporters mapped to the qubes seen by the collector. The key alone
     /// cannot distinguish a qube from another qube that later reuses its domain ID.
-    pub expected: BTreeMap<ReporterKey, String>,
+    pub expected: BTreeMap<ReporterKey, QubeIdentity>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -26,13 +26,13 @@ pub struct HostFrame {
     pub tick: Tick,
     pub sample: HostSample,
     pub memory_enabled: bool,
-    pub network_identity: Option<String>,
+    pub network_identity: Option<QubeIdentity>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct RawFrame {
     pub tick_id: String,
-    pub identity: String,
+    pub identity: QubeIdentity,
     pub session: String,
     pub timestamp: f64,
     pub payload: Vec<u8>,

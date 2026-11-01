@@ -6,7 +6,7 @@
 use super::diagnostics::StderrCapture;
 use crate::metrics::handoff::{RawFrame, MAX_REPORT_BYTES};
 use crate::metrics::publish_bytes;
-use crate::metrics::ReporterKey;
+use crate::metrics::{QubeIdentity, ReporterKey};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{killpg, Signal};
@@ -43,7 +43,7 @@ pub fn shell_quote(text: &str) -> String {
 #[derive(Clone)]
 pub struct RawTarget {
     pub path: PathBuf,
-    pub identity: String,
+    pub identity: QubeIdentity,
 }
 impl RawTarget {
     pub fn publish(&self, tick_id: &str, session: &str, payload: &[u8]) -> Result<(), String> {
@@ -652,7 +652,10 @@ mod tests {
         fn target(&self) -> RawTarget {
             RawTarget {
                 path: self.0.join("raw"),
-                identity: "23/test".into(),
+                identity: QubeIdentity {
+                    domain_id: 23,
+                    uuid: "test".into(),
+                },
             }
         }
         fn start(&self, body: &str, timing: Timing) -> Reader {
@@ -709,7 +712,13 @@ mod tests {
         let first = attempts.frame("first-tick");
         // Wrong-domain and malformed measurement fields belong to parser tests.
         assert_eq!(first.payload, b"M1 24 invalid: \xff\x00");
-        assert_eq!(first.identity, "23/test");
+        assert_eq!(
+            first.identity,
+            QubeIdentity {
+                domain_id: 23,
+                uuid: "test".into()
+            }
+        );
         assert!(!first.session.is_empty());
         assert!(first.timestamp > 0.0);
         request_when_ready(&reader, "second-tick");
@@ -835,7 +844,10 @@ mod tests {
             },
             RawTarget {
                 path: target.clone(),
-                identity: "23/test".into(),
+                identity: QubeIdentity {
+                    domain_id: 23,
+                    uuid: "test".into(),
+                },
             },
         )
         .unwrap();
@@ -899,7 +911,10 @@ mod tests {
             },
             RawTarget {
                 path: attempts.0.join("raw"),
-                identity: "23/test".into(),
+                identity: QubeIdentity {
+                    domain_id: 23,
+                    uuid: "test".into(),
+                },
             },
         )
         .unwrap();

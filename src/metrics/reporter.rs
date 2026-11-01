@@ -67,16 +67,13 @@ mod tests {
     #[test]
     fn filenames_and_json_keys_keep_the_existing_layout() {
         let expected = BTreeMap::from([
-            (ReporterKey::QubeMetrics(23), "23/uuid"),
-            (ReporterKey::Network, "42/network-uuid"),
+            (ReporterKey::QubeMetrics(23), "qube-a"),
+            (ReporterKey::Network, "network-qube"),
         ]);
         assert_eq!(ReporterKey::QubeMetrics(23).to_string(), "memory-23");
         assert_eq!(ReporterKey::Network.to_string(), "network");
         let json = serde_json::to_string(&expected).unwrap();
-        assert_eq!(
-            json,
-            r#"{"memory-23":"23/uuid","network":"42/network-uuid"}"#
-        );
+        assert_eq!(json, r#"{"memory-23":"qube-a","network":"network-qube"}"#);
         assert_eq!(
             serde_json::from_str::<BTreeMap<ReporterKey, &str>>(&json).unwrap(),
             expected

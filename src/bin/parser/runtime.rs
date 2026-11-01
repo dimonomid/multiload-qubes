@@ -2,7 +2,7 @@
 //! when its accepted requests finish or its 100 ms deadline expires.
 use crate::metrics::handoff::{self, HostFrame, RawFrame};
 use crate::metrics::protocol::{Reading, Tracker};
-use crate::metrics::{eligible, publish, shutdown, ReporterKey};
+use crate::metrics::{eligible, publish, shutdown, QubeIdentity, ReporterKey};
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags};
@@ -12,7 +12,7 @@ use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 struct Report {
-    identity: String,
+    identity: QubeIdentity,
     session: String,
     timestamp: f64,
     tracker: Tracker,
@@ -162,7 +162,7 @@ impl Parser {
                 frame.memory_enabled
                     && active
                         .get(id)
-                        .is_some_and(|qube| report.identity == format!("{id}/{}", qube.uuid))
+                        .is_some_and(|qube| report.identity == qube.identity)
             }
         });
     }

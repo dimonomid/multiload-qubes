@@ -1,4 +1,5 @@
 //! Exercises the real parser process through atomic file publication and inotify.
+use multiload_qubes::metrics::QubeIdentity;
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use serde_json::json;
 use std::cell::Cell;
@@ -6,6 +7,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn identity(domain_id: u32, uuid: &str) -> QubeIdentity {
+    QubeIdentity {
+        domain_id,
+        uuid: uuid.into(),
+    }
+}
 
 struct Fixture {
     path: PathBuf,
@@ -48,15 +56,17 @@ impl Fixture {
     ) -> f64 {
         self.sequence.set(self.sequence.get() + 1);
         let domain = |id| json!({"id":id,"identity":format!("uuid-{id}"),"name":format!("qube-{id}"),"cpu_ns":0,"vcpus":2,"allocated":1000,"paused":false,"shutdown":false,"stubdom":null});
-        let expected: std::collections::BTreeMap<_, _> =
-            expected.iter().map(|file| (*file, "1/uuid-1")).collect();
+        let expected: std::collections::BTreeMap<_, _> = expected
+            .iter()
+            .map(|file| (*file, identity(1, "uuid-1")))
+            .collect();
         let sample = json!({
             "timestamp":timestamp,"period":period,
             "host":{"total":4000,"free":2000,"cpus":4,"domains":[domain(0),domain(1)]},
             "cpu":25,"qube_cpu":null,"disk":null,
             "dom0_ram":[1000,100],"dom0_swap":[100,50],
         });
-        let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline":now()+wait,"expected":expected},"sample":sample,"memory_enabled":memory,"network_identity":"1/uuid-1"});
+        let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline":now()+wait,"expected":expected},"sample":sample,"memory_enabled":memory,"network_identity":identity(1, "uuid-1")});
         self.write("host.json", &serde_json::to_vec(&frame).unwrap());
         timestamp
     }
@@ -64,13 +74,20 @@ impl Fixture {
         format!("collector-a/{}", self.sequence.get())
     }
     fn raw(&self, file: &str, session: &str, bytes: &[u8]) {
-        self.raw_for(file, &self.tick_id(), "1/uuid-1", session, now(), bytes);
+        self.raw_for(
+            file,
+            &self.tick_id(),
+            identity(1, "uuid-1"),
+            session,
+            now(),
+            bytes,
+        );
     }
     fn raw_for(
         &self,
         file: &str,
         tick_id: &str,
-        identity: &str,
+        identity: QubeIdentity,
         session: &str,
         timestamp: f64,
         bytes: &[u8],
@@ -201,7 +218,14 @@ fn deadline_publishes_partial_data_and_late_replies_do_not_change_it() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(f.version(), version);
     let next = f.begin(&["network"], 0.1, true);
-    f.raw_for("network", &old_tick_id, "1/uuid-1", "a", now(), NETWORK);
+    f.raw_for(
+        "network",
+        &old_tick_id,
+        identity(1, "uuid-1"),
+        "a",
+        now(),
+        NETWORK,
+    );
     assert!(
         f.wait(next).network.is_none(),
         "an old reply cannot satisfy the next tick"
@@ -231,16 +255,11 @@ fn validates_reports_recovers_from_bad_files_and_preserves_network_baselines() {
         f.raw("memory-1", "a", bytes);
         assert_eq!(f.wait(stamp).unknown, 1000);
     }
-    let stamp = f.begin(&["memory-1"], 0.1, true);
-    f.raw_for(
-        "memory-1",
-        &f.tick_id(),
-        "1/old-incarnation",
-        "a",
-        now(),
-        MEMORY,
-    );
-    assert_eq!(f.wait(stamp).unknown, 1000);
+    for wrong_identity in [identity(1, "old-incarnation"), identity(2, "uuid-1")] {
+        let stamp = f.begin(&["memory-1"], 0.1, true);
+        f.raw_for("memory-1", &f.tick_id(), wrong_identity, "a", now(), MEMORY);
+        assert_eq!(f.wait(stamp).unknown, 1000);
+    }
     let stamp = f.begin(&["network"], 0.1, true);
     f.write("raw/network", &vec![b'x'; 70 * 1024]);
     assert!(f.wait(stamp).network.is_none());

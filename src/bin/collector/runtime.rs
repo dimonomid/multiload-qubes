@@ -5,8 +5,8 @@
 use super::{disk, stream, xen};
 
 use crate::metrics::{
-    eligible, handoff, protocol, publish, shutdown, Host, HostSample, Identity, ReporterKey,
-    MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
+    eligible, handoff, protocol, publish, shutdown, Host, HostSample, Qube, QubeIdentity,
+    ReporterKey, MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
 };
 use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
 #[cfg(test)]
@@ -23,7 +23,7 @@ use stream::{CommandSpec, Reader, Timing};
 /// Host usage uses the host CPU count; per-qube usage uses that qube's vCPUs.
 #[derive(Default)]
 pub struct CpuTracker {
-    previous: BTreeMap<(u32, String), (u64, Option<u32>, bool)>,
+    previous: BTreeMap<QubeIdentity, (u64, Option<u32>, bool)>,
     per_domain: Option<DomainCpuSnapshot>,
     time: Option<Duration>,
 }
@@ -44,7 +44,7 @@ impl CpuTracker {
         for domain in &host.domains {
             // Xen can reuse a domain ID for another qube. Do not subtract its
             // counters from the old qube's counters.
-            let key = (domain.id, domain.identity.clone());
+            let key = domain.qube_identity();
             let reporting = !domain.paused
                 && !domain.shutdown
                 && (domain.id == 0 || active.contains_key(&domain.id));
@@ -67,7 +67,7 @@ impl CpuTracker {
                                 id: if domain.id == 0 {
                                     "dom0".into()
                                 } else {
-                                    format!("{}/{}", domain.id, domain.identity)
+                                    key.chart_id()
                                 },
                                 name: if domain.id == 0 {
                                     "dom0".into()
@@ -110,10 +110,10 @@ const MAX_NUM_REPORTER_WORKERS: usize = MAX_NUM_QUBE_REPORTERS + NUM_NETWORK_REP
 
 /// Owns only transports; measurement fields are parsed by the other service.
 struct Reporters {
-    readers: BTreeMap<ReporterKey, (Identity, Reader)>,
+    readers: BTreeMap<ReporterKey, (Qube, Reader)>,
     retired: Vec<Reader>,
     directory: std::path::PathBuf,
-    factory: fn(&Identity, ReporterKey) -> CommandSpec,
+    factory: fn(&Qube, ReporterKey) -> CommandSpec,
     limit: usize,
 }
 impl Reporters {
@@ -122,20 +122,23 @@ impl Reporters {
             readers: BTreeMap::new(),
             retired: Vec::new(),
             directory,
-            factory: |identity, key| CommandSpec::qube(&identity.name, key),
+            factory: |qube, key| CommandSpec::qube(&qube.name, key),
             limit: MAX_NUM_REPORTER_WORKERS,
         }
     }
     fn sync(&mut self, host: &Host, memory: bool, network: Option<&str>) {
         let mut wanted = BTreeMap::new();
         let mut memory_count = 0;
-        for identity in eligible(host).into_values() {
+        for qube in eligible(host).into_values() {
             if memory && memory_count < MAX_NUM_QUBE_REPORTERS {
                 memory_count += 1;
-                wanted.insert(ReporterKey::QubeMetrics(identity.id), identity.clone());
+                wanted.insert(
+                    ReporterKey::QubeMetrics(qube.identity.domain_id),
+                    qube.clone(),
+                );
             }
-            if network == Some(identity.name.as_str()) {
-                wanted.insert(ReporterKey::Network, identity);
+            if network == Some(qube.name.as_str()) {
+                wanted.insert(ReporterKey::Network, qube);
             }
         }
         // The same reporter key may now belong to a different qube. Compare
@@ -143,7 +146,7 @@ impl Reporters {
         let remove: Vec<_> = self
             .readers
             .iter()
-            .filter(|(key, (identity, _))| wanted.get(*key).is_none_or(|new| new != identity))
+            .filter(|(key, (qube, _))| wanted.get(*key).is_none_or(|new| new != qube))
             .map(|(key, _)| *key)
             .collect();
         for key in remove {
@@ -170,7 +173,7 @@ impl Reporters {
                 }
             }
         }
-        for (key, identity) in wanted {
+        for (key, qube) in wanted {
             if self.readers.contains_key(&key) {
                 continue;
             }
@@ -180,21 +183,21 @@ impl Reporters {
             }
             let target = stream::RawTarget {
                 path: self.directory.join(key.to_string()),
-                identity: format!("{}/{}", identity.id, identity.uuid),
+                identity: qube.identity.clone(),
             };
-            match Reader::spawn((self.factory)(&identity, key), Timing::default(), target) {
+            match Reader::spawn((self.factory)(&qube, key), Timing::default(), target) {
                 Ok(reader) => {
-                    self.readers.insert(key, (identity, reader));
+                    self.readers.insert(key, (qube, reader));
                 }
                 Err(error) => eprintln!("Cannot start guest reporter: {error}"),
             }
         }
     }
-    fn request(&self, tick_id: &str) -> BTreeMap<ReporterKey, String> {
+    fn request(&self, tick_id: &str) -> BTreeMap<ReporterKey, QubeIdentity> {
         let mut expected = BTreeMap::new();
-        for (key, (identity, reader)) in &self.readers {
+        for (key, (qube, reader)) in &self.readers {
             if reader.request(tick_id) {
-                expected.insert(*key, format!("{}/{}", identity.id, identity.uuid));
+                expected.insert(*key, qube.identity.clone());
             }
         }
         expected
@@ -278,7 +281,7 @@ pub fn run(options: Options) -> Result<(), String> {
             let network_identity = eligible(&host)
                 .values()
                 .find(|key| options.network.as_deref() == Some(key.name.as_str()))
-                .map(|key| format!("{}/{}", key.id, key.uuid));
+                .map(|qube| qube.identity.clone());
             let sample = HostSample {
                 timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
                 period: options.interval,
@@ -542,7 +545,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert_eq!(frame.payload, b"not a metric: \xff");
-        assert_eq!(frame.identity, "1/uuid-1");
+        assert_eq!(
+            frame.identity,
+            QubeIdentity {
+                domain_id: 1,
+                uuid: "uuid-1".into()
+            }
+        );
         pool.sync(&h, true, None);
         pool.request("test-tick");
         let same: handoff::RawFrame =
@@ -557,7 +566,7 @@ mod tests {
         while pool
             .readers
             .get(&ReporterKey::QubeMetrics(1))
-            .is_none_or(|(key, _)| key.uuid != "replacement")
+            .is_none_or(|(key, _)| key.identity.uuid != "replacement")
         {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
