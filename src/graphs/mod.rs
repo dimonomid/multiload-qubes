@@ -15,10 +15,9 @@ use std::collections::VecDeque;
 
 use crate::Snapshot;
 
-const HISTORY_LENGTH: usize = 2048;
-
 pub struct Graphs {
     history: VecDeque<Option<Snapshot>>,
+    history_width: usize,
     tooltips: [String; ChartKind::COUNT],
     tick: u64,
     pub(crate) palette: [Palette; ChartKind::COUNT],
@@ -28,6 +27,7 @@ impl Graphs {
     pub(crate) fn new() -> Self {
         Self {
             history: VecDeque::new(),
+            history_width: 1,
             tooltips: tooltips(None, false),
             tick: 0,
             palette: std::array::from_fn(|kind| {
@@ -36,6 +36,20 @@ impl Graphs {
                     ChartKind::ALL[kind],
                 )
             }),
+        }
+    }
+    pub(crate) fn set_history_width(&mut self, width: i32) {
+        let width = width.max(1) as usize;
+        if width == self.history_width {
+            return;
+        }
+        self.history_width = width;
+        while self.history.len() > width {
+            self.history.pop_front();
+        }
+        // Drop old samples and release their deque slots when charts get narrower.
+        if self.history.capacity() > width {
+            self.history.shrink_to_fit();
         }
     }
     pub(crate) fn update(&mut self, demo: bool) {
@@ -80,10 +94,10 @@ impl Graphs {
     }
     pub(crate) fn push_sample(&mut self, sample: Option<Snapshot>, demo: bool) {
         self.tooltips = tooltips(sample.as_ref(), demo);
-        self.history.push_back(sample);
-        while self.history.len() > HISTORY_LENGTH {
+        while self.history.len() >= self.history_width {
             self.history.pop_front();
         }
+        self.history.push_back(sample);
     }
 }
 
@@ -568,12 +582,30 @@ mod tests {
     }
 
     #[test]
-    fn bounded_history_and_missing_data() {
+    fn history_follows_chart_width_and_keeps_the_newest_samples() {
         let mut g = Graphs::new();
-        for _ in 0..HISTORY_LENGTH + 1 {
+        g.set_history_width(20);
+        for _ in 0..100 {
             g.update(true);
         }
-        assert_eq!(g.history.len(), HISTORY_LENGTH);
-        assert!(g.tooltips.iter().all(|t| t.as_str().contains("DEMO")));
+        assert_eq!(g.history.len(), 20);
+        assert_eq!(g.history.front().unwrap().as_ref().unwrap().timestamp, 81.0);
+        g.set_history_width(5);
+        assert_eq!(g.history.len(), 5);
+        assert_eq!(g.history.front().unwrap().as_ref().unwrap().timestamp, 96.0);
+        assert!(g.history.capacity() < 20);
+        g.set_history_width(10);
+        assert_eq!(g.history.len(), 5); // Enlarging cannot restore discarded samples.
+        g.push_sample(None, false);
+        assert_eq!(g.history.len(), 6);
+        assert!(g.history.back().unwrap().is_none());
+        assert!(g.tooltips.iter().all(|t| t.contains("unavailable")));
+        for _ in 0..10 {
+            g.update(true);
+        }
+        assert_eq!(g.history.len(), 10);
+        assert!(g.history.iter().all(Option::is_some));
+        g.set_history_width(0);
+        assert_eq!(g.history.len(), 1);
     }
 }

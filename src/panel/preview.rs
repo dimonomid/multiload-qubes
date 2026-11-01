@@ -46,6 +46,7 @@ pub fn run() -> ExitCode {
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).unwrap();
         let context = cairo::Context::new(&surface).unwrap();
         let mut graphs = crate::Graphs::new();
+        graphs.set_history_width(width / ChartKind::COUNT as i32);
         graphs.palette = Appearance::builtin(theme).palettes;
         for _ in 0..400 {
             graphs.update(true);
@@ -79,10 +80,10 @@ pub fn run() -> ExitCode {
     }
     let panel = Panel::new(None, true);
     panel.config.borrow_mut().width = 96;
+    panel.resize();
     for _ in 0..400 {
         panel.tick();
     }
-    panel.resize();
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_title("Multiload for Qubes — DEMO");
     window.add(&panel.area);

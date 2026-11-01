@@ -124,6 +124,7 @@ impl Preferences {
         chart_list.select_row(chart_list.row_at_index(0).as_ref());
         available.select_row(available.row_at_index(0).as_ref());
         let mut demo = crate::Graphs::new();
+        demo.set_history_width(320);
         for _ in 0..400 {
             demo.update(true);
         }
@@ -379,6 +380,12 @@ impl Preferences {
         self.reset.connect_clicked(move |_| {
             if let Some(p) = weak.upgrade() {
                 p.select(&Selection::Builtin(BuiltinTheme::default()).id());
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.preview.connect_size_allocate(move |_, allocation| {
+            if let Some(p) = weak.upgrade() {
+                p.demo.borrow_mut().set_history_width(allocation.width());
             }
         });
         let weak = Rc::downgrade(self);

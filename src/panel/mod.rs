@@ -60,6 +60,12 @@ impl Panel {
             .add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
         panel.area.set_has_tooltip(true);
         let weak = Rc::downgrade(&panel);
+        panel.area.connect_size_allocate(move |_, allocation| {
+            if let Some(p) = weak.upgrade() {
+                p.fit_history(allocation.width());
+            }
+        });
+        let weak = Rc::downgrade(&panel);
         panel.area.connect_draw(move |widget, context| {
             if let Some(p) = weak.upgrade() {
                 draw_graphs(
@@ -169,7 +175,24 @@ impl Panel {
         } else {
             (width * count, size)
         };
+        self.fit_history(w);
         self.area.set_size_request(w, h);
+    }
+    fn fit_history(&self, width: i32) {
+        let count = self
+            .config
+            .borrow()
+            .enabled
+            .iter()
+            .filter(|v| **v)
+            .count()
+            .max(1) as i32;
+        let chart_width = if self.vertical.get() {
+            width
+        } else {
+            width / count
+        };
+        self.graphs.borrow_mut().set_history_width(chart_width);
     }
     fn size_changed(&self, vertical: Option<bool>) {
         if let Some(vertical) = vertical {
