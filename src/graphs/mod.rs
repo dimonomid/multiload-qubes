@@ -1,13 +1,13 @@
 //! Graph history, tooltips and typed Cairo rendering.
 //!
-//! Each panel tick adds one history column. The collector may run at a different
-//! interval, so columns can repeat a fresh snapshot. Missing data stays a gap;
-//! it must not look like measured zero usage.
+//! Live samples follow metrics publications. Missing updates create gaps;
+//! they must not look like measured zero usage.
 mod domain_graph;
 mod input;
 use crate::palette::source;
 use crate::palette::Palette;
 use domain_graph::Metric;
+pub(crate) use input::Version as InputVersion;
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -61,11 +61,18 @@ impl Graphs {
                 )),
             })
         } else {
-            input::read(std::path::Path::new("/run/multiload-qubes/metrics"))
-                .ok()
-                .and_then(|s| Snapshot::decode_fresh(&s).ok())
+            Self::read_snapshot(std::path::Path::new("/run/multiload-qubes/metrics"))
+                .map(|(sample, _)| sample)
         };
-        // Repeat a still-fresh sample at the chart interval. Missing/stale data creates a gap.
+        self.push_sample(sample, demo);
+    }
+    pub(crate) fn read_snapshot(path: &std::path::Path) -> Option<(Snapshot, InputVersion)> {
+        let (text, version) = input::read_versioned(path).ok()?;
+        Snapshot::decode_fresh(&text)
+            .ok()
+            .map(|snapshot| (snapshot, version))
+    }
+    pub(crate) fn push_sample(&mut self, sample: Option<Snapshot>, demo: bool) {
         self.tooltips = tooltips(sample.as_ref(), demo);
         self.history.push_back(sample);
         while self.history.len() > 2048 {
@@ -124,7 +131,7 @@ fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; 7] {
         ]
     } else {
         ["CPU", "RAM", "Network", "Swap", "Disk", "Qube RAM", "Qube CPU"].map(|name| format!(
-            "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service in dom0."
+            "{name}: metrics unavailable or stale.\nCheck multiload-qubes-collector.service and multiload-qubes-parser.service in dom0."
         ))
     };
     text.map(|text| {

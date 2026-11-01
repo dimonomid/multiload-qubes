@@ -20,7 +20,6 @@ pub(super) struct Preferences {
     pub dialog: gtk::Dialog,
     pub(super) notebook: gtk::Notebook,
     pub(super) width: gtk::SpinButton,
-    pub(super) interval: gtk::SpinButton,
     pub(super) available: gtk::ListBox,
     pub(super) chart_list: gtk::ListBox,
     pub(super) enable_chart: gtk::Button,
@@ -96,8 +95,6 @@ impl Preferences {
         chart.set_active(Some(0));
         let width = gtk::SpinButton::with_range(0., 512., 1.);
         width.set_value(config.width as f64);
-        let interval = gtk::SpinButton::with_range(250., 10000., 250.);
-        interval.set_value(config.interval as f64);
         let available = gtk::ListBox::new();
         let chart_list = gtk::ListBox::new();
         for list in [&available, &chart_list] {
@@ -133,7 +130,6 @@ impl Preferences {
             dialog,
             notebook: gtk::Notebook::new(),
             width,
-            interval,
             available,
             enable_chart: gtk::Button::with_label(">"),
             disable_chart: gtk::Button::with_label("<"),
@@ -189,8 +185,6 @@ impl Preferences {
         let general = grid();
         general.attach(&label("Chart width (0 = square)"), 0, 0, 1, 1);
         general.attach(&self.width, 1, 0, 1, 1);
-        general.attach(&label("Update interval (ms)"), 0, 1, 1, 1);
-        general.attach(&self.interval, 1, 1, 1, 1);
         let charts = gtk::Grid::builder()
             .column_spacing(12)
             .row_spacing(6)
@@ -216,9 +210,9 @@ impl Preferences {
         moves.pack_start(&self.move_down, false, false, 0);
         moves.set_valign(gtk::Align::Start);
         charts.attach(&moves, 3, 1, 1, 1);
-        general.attach(&charts, 0, 2, 2, 1);
+        general.attach(&charts, 0, 1, 2, 1);
         self.update_move_buttons();
-        general.attach(&label("Per-qube charts: 100% = one domain's capacity.\nColors can be changed in Appearance."), 0, 3, 2, 1);
+        general.attach(&label("Per-qube charts: 100% = one domain's capacity.\nColors can be changed in Appearance."), 0, 2, 2, 1);
         let appearance = grid();
         appearance.attach(&label("Theme (applies to all charts)"), 0, 0, 1, 1);
         appearance.attach(&self.theme, 1, 0, 2, 1);
@@ -551,7 +545,6 @@ impl Preferences {
             .ok_or("The panel item has been removed.")?;
         let mut config = owner.config.borrow().clone();
         config.width = self.width.value_as_int();
-        config.interval = self.interval.value_as_int() as u32;
         config.enabled = std::array::from_fn(|i| {
             self.chart_rows[i].parent().as_ref() == Some(self.chart_list.upcast_ref())
         });
@@ -579,7 +572,6 @@ impl Preferences {
         owner.resize();
         owner.area.queue_draw();
         owner.area.trigger_tooltip_query();
-        owner.restart_timer();
         Ok(())
     }
     fn confirm(&self, text: &str, cancel: &str, accept: &str) -> bool {

@@ -14,7 +14,7 @@ struct Cli {
     once: bool,
 
     /// Collection interval in seconds (0.25–10).
-    #[arg(long, default_value_t = 0.5, value_parser = parse_interval)]
+    #[arg(long, default_value_t = 1.0, value_parser = parse_interval)]
     interval: f64,
 
     /// Path of the host snapshot.
@@ -82,7 +82,7 @@ mod tests {
     fn defaults_and_existing_options() {
         let options = parse(&[]).unwrap();
         assert!(!options.once && options.memory);
-        assert_eq!(options.interval, 0.5);
+        assert_eq!(options.interval, 1.0);
         assert_eq!(
             options.output,
             PathBuf::from("/run/multiload-qubes-host/metrics")

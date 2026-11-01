@@ -4,6 +4,7 @@ mod ffi;
 mod preferences;
 pub(crate) mod preview;
 mod themes;
+mod updates;
 
 use config::Config;
 use ffi::Host;
@@ -21,6 +22,7 @@ pub(super) struct Panel {
     config: RefCell<Config>,
     vertical: Cell<bool>,
     timer: RefCell<Option<glib::SourceId>>,
+    updates: RefCell<Option<Rc<updates::Feed>>>,
     preferences: RefCell<Option<Rc<preferences::Preferences>>>,
     closed: Cell<bool>,
     menu_blocked: Cell<bool>,
@@ -35,6 +37,7 @@ impl Panel {
             config: RefCell::new(Config::default()),
             vertical: Cell::new(false),
             timer: RefCell::new(None),
+            updates: RefCell::new(None),
             preferences: RefCell::new(None),
             closed: Cell::new(false),
             menu_blocked: Cell::new(false),
@@ -101,8 +104,24 @@ impl Panel {
             host.attach(&panel.area);
         }
         panel.resize();
-        panel.tick();
-        panel.restart_timer();
+        if demo {
+            panel.tick();
+            panel.start_demo_timer();
+        } else {
+            let weak = Rc::downgrade(&panel);
+            match updates::Feed::start(
+                std::path::Path::new("/run/multiload-qubes/metrics"),
+                move |sample| {
+                    if let Some(panel) = weak.upgrade().filter(|p| !p.closed.get()) {
+                        panel.graphs.borrow_mut().push_sample(sample, false);
+                        panel.redraw();
+                    }
+                },
+            ) {
+                Ok(feed) => *panel.updates.borrow_mut() = Some(feed),
+                Err(error) => eprintln!("Cannot watch Multiload metrics: {error}"),
+            }
+        }
         panel.area.show();
         panel
     }
@@ -131,6 +150,9 @@ impl Panel {
     }
     fn tick(&self) {
         self.graphs.borrow_mut().update(self.demo);
+        self.redraw();
+    }
+    fn redraw(&self) {
         self.area.trigger_tooltip_query();
         self.area.queue_draw();
     }
@@ -156,22 +178,19 @@ impl Panel {
         }
         self.resize();
     }
-    fn restart_timer(self: &Rc<Self>) {
+    fn start_demo_timer(self: &Rc<Self>) {
         if let Some(timer) = self.timer.borrow_mut().take() {
             timer.remove();
         }
         let weak = Rc::downgrade(self);
-        let timer = glib::timeout_add_local(
-            Duration::from_millis(self.config.borrow().interval as u64),
-            move || {
-                if let Some(p) = weak.upgrade().filter(|p| !p.closed.get()) {
-                    p.tick();
-                    glib::ControlFlow::Continue
-                } else {
-                    glib::ControlFlow::Break
-                }
-            },
-        );
+        let timer = glib::timeout_add_local(Duration::from_millis(500), move || {
+            if let Some(p) = weak.upgrade().filter(|p| !p.closed.get()) {
+                p.tick();
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
         *self.timer.borrow_mut() = Some(timer);
     }
     fn configure(self: &Rc<Self>) {
@@ -188,6 +207,7 @@ impl Panel {
     fn shutdown(&self) {
         self.block_menu(false);
         self.closed.set(true);
+        self.updates.borrow_mut().take();
         if let Some(timer) = self.timer.borrow_mut().take() {
             timer.remove();
         }

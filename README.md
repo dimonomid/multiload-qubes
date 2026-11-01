@@ -178,7 +178,7 @@ Add, and select **Multiload for Qubes**.
 ### Panel plugin
 
 Right-click the charts and select **Properties** to change enabled charts,
-their order, appearance and refresh interval. These settings only affect the
+their order and appearance. These settings only affect the
 panel plugin; they do not change how the collector collects data.
 
 ### Collector
@@ -214,7 +214,7 @@ Collector settings:
 - `--no-qube-metrics`: disable guest RAM and swap collection. Their RAM
   allocation is still counted, but actual usage is unknown.
 - `--interval SECONDS`: host and guest collection interval, from `0.25` to `10`;
-  default `0.5`.
+  default `1`.
 
 To remove all local overrides for the collector service and restore defaults:
 

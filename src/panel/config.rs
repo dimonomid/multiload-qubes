@@ -120,7 +120,6 @@ impl Appearance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub width: i32,
-    pub interval: u32,
     pub enabled: [bool; 7],
     pub order: [usize; 7],
     pub appearance: Appearance,
@@ -129,7 +128,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             width: 0,
-            interval: 1000,
             enabled: DEFAULT_ENABLED,
             order: [0, 1, 2, 3, 4, 5, 6],
             appearance: Appearance::default(),
@@ -159,7 +157,6 @@ impl Config {
         if (1..4).contains(&self.width) {
             self.width = 4;
         }
-        self.interval = self.interval.clamp(250, 10000);
         if !self.enabled.iter().any(|v| *v) {
             self.enabled = DEFAULT_ENABLED;
         }
@@ -172,10 +169,6 @@ impl Config {
     pub fn decode(file: &KeyFile) -> Self {
         let mut config = Self {
             width: file.integer("Graphs", "width").unwrap_or(0),
-            interval: file
-                .integer("Graphs", "interval_ms")
-                .unwrap_or(1000)
-                .clamp(250, 10000) as u32,
             ..Self::default()
         };
         for (i, key) in CHART_KEYS.iter().enumerate() {
@@ -232,7 +225,6 @@ impl Config {
             &self.order.map(|i| CHART_KEYS[i]).join(","),
         );
         file.set_integer("Graphs", "width", self.width);
-        file.set_integer("Graphs", "interval_ms", self.interval as i32);
         for (key, value) in CHART_KEYS.iter().zip(self.enabled) {
             file.set_boolean("Graphs", key, value);
         }

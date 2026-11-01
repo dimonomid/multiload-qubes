@@ -398,7 +398,6 @@ fn self_test() {
     assert_eq!(prefs.editor.borrow().palettes[5].colors[1] & 255, 0);
     screenshot(&prefs);
     prefs.width.set_value(64.);
-    prefs.interval.set_value(500.);
     prefs
         .chart_list
         .select_row(prefs.chart_list.row_at_index(0).as_ref());
@@ -409,7 +408,6 @@ fn self_test() {
     assert!(loaded.appearance.unsaved());
     assert_eq!(loaded.appearance.selection.source(), Some(id.as_str()));
     assert_eq!(loaded.width, 64);
-    assert_eq!(loaded.interval, 500);
     assert!(!loaded.enabled[0]);
     assert_eq!(
         ThemeStore::load().0.find(&id).unwrap().palettes[5].colors[3],

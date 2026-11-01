@@ -3,17 +3,26 @@ use multiload_qubes_snapshot::MAX_WIRE_BYTES;
 use nix::fcntl::OFlag;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-pub(super) fn read(path: &Path) -> io::Result<String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Version(u64, u64, i64, i64);
+
+#[cfg(test)]
+fn read(path: &Path) -> io::Result<String> {
+    read_versioned(path).map(|(text, _)| text)
+}
+
+pub(super) fn read_versioned(path: &Path) -> io::Result<(String, Version)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
         .open(path)?;
     // Check the descriptor, not the path: the parser can replace the path
     // between opening it and this check.
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "metrics is not a regular file",
@@ -29,7 +38,15 @@ pub(super) fn read(path: &Path) -> io::Result<String> {
             "metrics exceeds size limit",
         ));
     }
-    Ok(text)
+    Ok((
+        text,
+        Version(
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ),
+    ))
 }
 
 #[cfg(test)]
