@@ -35,6 +35,7 @@ pub(super) struct Preferences {
     pub(super) border: gtk::SpinButton,
     pub(super) transparent: gtk::CheckButton,
     preview: gtk::DrawingArea,
+    reset: gtk::Button,
     demo: RefCell<crate::Graphs>,
     pub(super) editor: RefCell<Appearance>,
     pub(super) store: RefCell<ThemeStore>,
@@ -158,6 +159,7 @@ impl Preferences {
             border: gtk::SpinButton::with_range(0., 16., 1.),
             transparent: gtk::CheckButton::with_label("Transparent background"),
             preview: gtk::DrawingArea::new(),
+            reset: gtk::Button::with_label("Reset all appearance settings"),
             demo: RefCell::new(demo),
             editor: RefCell::new(editor),
             store: RefCell::new(store),
@@ -240,10 +242,9 @@ impl Preferences {
         appearance.attach(&self.transparent, 0, 11, 3, 1);
         self.preview.set_size_request(320, 64);
         appearance.attach(&self.preview, 0, 12, 3, 1);
-        let reset = gtk::Button::with_label("Reset all appearance settings");
         // Keep a widget name for the isolated GTK integration checks.
-        reset.set_widget_name("reset-appearance");
-        appearance.attach(&reset, 0, 13, 3, 1);
+        self.reset.set_widget_name("reset-appearance");
+        appearance.attach(&self.reset, 0, 13, 3, 1);
         self.status.set_line_wrap(true);
         appearance.attach(&self.status, 0, 14, 3, 1);
         self.notebook
@@ -374,20 +375,12 @@ impl Preferences {
                 }
             });
         }
-        if let Some(reset) = self
-            .notebook
-            .nth_page(Some(1))
-            .and_then(|w| w.downcast::<gtk::Grid>().ok())
-            .and_then(|g| g.child_at(0, 13))
-            .and_then(|w| w.downcast::<gtk::Button>().ok())
-        {
-            let weak = Rc::downgrade(self);
-            reset.connect_clicked(move |_| {
-                if let Some(p) = weak.upgrade() {
-                    p.select(&Selection::Builtin(BuiltinTheme::default()).id());
-                }
-            });
-        }
+        let weak = Rc::downgrade(self);
+        self.reset.connect_clicked(move |_| {
+            if let Some(p) = weak.upgrade() {
+                p.select(&Selection::Builtin(BuiltinTheme::default()).id());
+            }
+        });
         let weak = Rc::downgrade(self);
         self.preview.connect_draw(move |widget, cr| {
             if let Some(p) = weak.upgrade() {
