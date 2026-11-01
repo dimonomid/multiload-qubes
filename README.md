@@ -3,6 +3,8 @@
 A native GTK3 XFCE panel plugin with scrolling charts for whole-machine CPU,
 RAM, network, swap and disk I/O, for [Qubes OS](https://www.qubes-os.org/).
 
+![Multiload-Qubes demo](https://dmitryfrank.com/_media/projects/multiload-qubes/multiload_qubes_demo_1.gif)
+
 Inspired by good old [indicator-multiload](https://github.com/mh21/indicator-multiload)
 by Michael Hofmann, and the more modern [multiload-ng](https://github.com/udda/multiload-ng) by Mario Cianciolo.
 None of these existing projects are usable on Qubes because of its
