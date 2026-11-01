@@ -190,11 +190,19 @@ impl Parser {
             if file == "network" {
                 frame.network_identity.as_ref() == Some(&report.identity)
             } else {
-                frame.memory_enabled
-                    && active.iter().any(|(id, key)| {
-                        file == &format!("memory-{id}")
-                            && report.identity == format!("{id}/{}", key.uuid)
-                    })
+                if !frame.memory_enabled {
+                    return false;
+                }
+                let Some(id) = file
+                    .strip_prefix("memory-")
+                    .and_then(|s| s.parse::<u32>().ok())
+                else {
+                    return false;
+                };
+                active.get(&id).is_some_and(|key| {
+                    file == &format!("memory-{id}")
+                        && report.identity == format!("{id}/{}", key.uuid)
+                })
             }
         });
     }
