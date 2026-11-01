@@ -55,7 +55,7 @@ pub struct RawFrame {
     pub session: String,
     /// CLOCK_MONOTONIC nanoseconds when the collector received the line, for deadline checks.
     pub received_ns: u64,
-    /// Unix seconds for age checks, not a guest timestamp.
+    /// Unix receipt time for inspection; cache age uses received_ns.
     pub timestamp: f64,
     /// Unparsed guest bytes without the newline; empty for a disconnect notice.
     pub payload: Vec<u8>,
@@ -82,9 +82,4 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
         return Err("input file exceeds size limit".into());
     }
     Ok(bytes)
-}
-
-/// Reject non-finite, future, and overly old receipt times.
-pub fn fresh(timestamp: f64, now: f64, max_age: f64) -> bool {
-    timestamp.is_finite() && now >= timestamp && now - timestamp <= max_age
 }

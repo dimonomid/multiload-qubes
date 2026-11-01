@@ -241,8 +241,8 @@ fn deadline_publishes_partial_data_and_late_replies_do_not_change_it() {
 }
 
 #[test]
-fn receipt_cutoff_uses_monotonic_nanoseconds_not_unix_timestamp_order() {
-    for (late_ns, expected_used) in [(0, 700), (1, 100)] {
+fn late_reports_already_available_at_publication_are_still_useful() {
+    for late_ns in [0, 1] {
         let mut f = Fixture::new();
         let stamp = f.begin_at(now() - 1.0, &["memory-1"], 1.0, true, 0.5);
         let mut host: serde_json::Value =
@@ -266,7 +266,7 @@ fn receipt_cutoff_uses_monotonic_nanoseconds_not_unix_timestamp_order() {
         raw["received_ns"] = json!(deadline_ns + late_ns);
         f.write("raw/memory-1", &serde_json::to_vec(&raw).unwrap());
         f.start();
-        assert_eq!(f.wait(stamp).used, expected_used);
+        assert_eq!(f.wait(stamp).used, 700);
         f.stop();
     }
 }
@@ -328,13 +328,114 @@ fn validates_reports_recovers_from_bad_files_and_preserves_network_baselines() {
     }
     let stamp = f.begin(&["network"], 0.1, true);
     f.write("raw/network", &vec![b'x'; 70 * 1024]);
-    assert!(f.wait(stamp).network.is_none());
+    assert_eq!(
+        f.wait(stamp).network,
+        Some((1000.0, 0.0)),
+        "a bad file must not discard a recent valid reading"
+    );
     let stamp = f.begin(&["memory-1"], 0.1, true);
     f.raw("memory-1", "a", MEMORY);
     assert_eq!(f.wait(stamp).used, 700);
     f.stop();
     f.start();
     assert_eq!(f.wait(stamp).used, 700);
+    f.stop();
+}
+
+#[test]
+fn late_memory_is_cached_without_republishing_and_does_not_finish_new_requests() {
+    let mut f = Fixture::new();
+    let first = f.begin(&["memory-1"], 0.1, true);
+    f.start();
+    assert_eq!(f.wait(first).unknown, 1000);
+    let version = f.version();
+    let old_tick_id = f.tick_id();
+    f.raw("memory-1", "a", MEMORY);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        f.version(),
+        version,
+        "a late reply must not trigger another publication"
+    );
+
+    let next = f.begin(&["memory-1"], 0.15, true);
+    let started = Instant::now();
+    f.raw_for(
+        "memory-1",
+        &old_tick_id,
+        identity(1, "uuid-1"),
+        "a",
+        now(),
+        MEMORY,
+    );
+    let snapshot = f.wait(next);
+    assert!(
+        started.elapsed() >= Duration::from_millis(120),
+        "cached data must not finish a new request early"
+    );
+    assert_eq!(snapshot.used, 700);
+    assert_eq!(snapshot.qube_ram.unwrap().entries.len(), 2);
+    assert_eq!(snapshot.swap.unwrap().entries[1].used, 375);
+
+    // Busy connections may not appear in the request list at all.
+    let next = f.begin(&[], 1.0, true);
+    assert_eq!(f.wait(next).used, 700);
+    f.stop();
+}
+
+#[test]
+fn late_network_reports_keep_counter_baselines_and_cache_the_next_rate() {
+    let mut f = Fixture::new();
+    let first = f.begin(&["network"], 0.1, true);
+    f.start();
+    assert!(f.wait(first).network.is_none());
+    f.raw("network", "a", NETWORK);
+    std::thread::sleep(Duration::from_millis(40));
+    let next = f.begin(&["network"], 0.1, true);
+    assert!(f.wait(next).network.is_none());
+    let version = f.version();
+    f.raw(
+        "network",
+        "a",
+        b"N1 1500000000 12345678-1234-1234-1234-123456789abc 1:600:200",
+    );
+    std::thread::sleep(Duration::from_millis(40));
+    assert_eq!(f.version(), version);
+    let next = f.begin(&[], 1.0, true);
+    assert_eq!(f.wait(next).network, Some((1000.0, 0.0)));
+    f.stop();
+}
+
+#[test]
+fn cached_memory_is_cleared_on_disconnect_disable_and_identity_change() {
+    let mut f = Fixture::new();
+    let first = f.begin(&["memory-1"], 1.0, true);
+    f.raw("memory-1", "a", MEMORY);
+    f.start();
+    assert_eq!(f.wait(first).used, 700);
+    f.raw("memory-1", "disconnected", b"");
+    std::thread::sleep(Duration::from_millis(40));
+    let next = f.begin(&[], 1.0, true);
+    assert_eq!(f.wait(next).unknown, 1000);
+
+    let next = f.begin(&["memory-1"], 1.0, true);
+    f.raw("memory-1", "b", MEMORY);
+    assert_eq!(f.wait(next).used, 700);
+    let next = f.begin(&[], 1.0, false);
+    assert_eq!(f.wait(next).unknown, 1000);
+
+    let next = f.begin(&["memory-1"], 1.0, true);
+    f.raw("memory-1", "b", MEMORY);
+    assert_eq!(f.wait(next).used, 700);
+    let mut host: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.path.join("host.json")).unwrap()).unwrap();
+    let next = now();
+    host["tick"]["tick_id"] = json!("replacement-tick");
+    host["tick"]["expected"] = json!({});
+    host["sample"]["timestamp"] = json!(next);
+    host["sample"]["host"]["domains"][1]["identity"] = json!("replacement");
+    f.write("host.json", &serde_json::to_vec(&host).unwrap());
+    assert_eq!(f.wait(next).unknown, 1000);
     f.stop();
 }
 
