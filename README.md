@@ -229,6 +229,9 @@ This does not change the panel plugin settings.
 
 ## Building
 
+Requires Rust 1.88 or newer (`rustc --version`). If Fedora's packaged Rust is
+older, use rustup to install a newer toolchain before running `cargo` and `make`.
+
 Build in a Fedora qube matching your dom0 release:
 
 ```bash
