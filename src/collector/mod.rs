@@ -181,12 +181,7 @@ impl Reporters {
                 path: self.directory.join(&file),
                 identity: format!("{}/{}", identity.id, identity.uuid),
             };
-            match Reader::spawn_raw(
-                (self.factory)(&identity, kind),
-                kind,
-                Timing::default(),
-                target,
-            ) {
+            match Reader::spawn((self.factory)(&identity, kind), Timing::default(), target) {
                 Ok(reader) => {
                     self.readers.insert(file, (identity, reader));
                 }
