@@ -324,6 +324,8 @@ impl Graphs {
                 } else if let Some(cpu) = s.cpu {
                     let v = cpu / 100.0 * (h - 2.0);
                     rect(cr, palette.colors[3], x, h - 1.0 - v, 1.0, v)?;
+                } else {
+                    rect(cr, palette.colors[6], x, h - 3.0, 1.0, 2.0)?;
                 }
             } else {
                 rect(cr, palette.colors[6], x, h - 3.0, 1.0, 2.0)?;
@@ -398,6 +400,40 @@ impl Graphs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_cpu_uses_missing_marker_but_measured_zero_does_not() {
+        let mut graphs = Graphs::new();
+        graphs.set_history_width(3);
+        graphs.update(true);
+        let mut sample = graphs.history.pop_back().unwrap().unwrap();
+        let palette = &mut graphs.palette[ChartKind::Cpu.index()];
+        palette.colors.fill(0);
+        palette.colors[6] = 0xFF0000FF;
+        sample.cpu = Some(0.0);
+        graphs.push_sample(Some(sample.clone()), false);
+        sample.cpu = None;
+        graphs.push_sample(Some(sample), false);
+        graphs.push_sample(None, false);
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 8, 8).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            graphs.draw(&cr, 8, 8, &[ChartKind::Cpu], false).unwrap();
+        }
+        let stride = surface.stride() as usize;
+        let pixels = surface.data().unwrap();
+        let pixel = |x: usize, y: usize| {
+            let offset = y * stride + x * 4;
+            u32::from_ne_bytes(pixels[offset..offset + 4].try_into().unwrap())
+        };
+        // Left to right: measured idle, unknown CPU, and a missing snapshot.
+        for y in 0..8 {
+            assert_eq!(pixel(5, y), 0);
+            let marker = if y >= 6 { 0xFFFF0000 } else { 0 };
+            assert_eq!(pixel(6, y), marker);
+            assert_eq!(pixel(7, y), marker);
+        }
+    }
+
     #[test]
     fn ram_stacks_used_then_unknown_then_spare_without_overlapping_alpha() {
         let mut graphs = Graphs::new();
