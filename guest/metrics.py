@@ -1,8 +1,10 @@
+# Run inside a Linux qube. Each collector request produces one RAM/swap report.
 import pathlib, subprocess, sys
 domid = subprocess.check_output(['xenstore-read', 'domid'], text=True).strip()
 # Closing the collector connection ends stdin and stops this script. Removing
 # the panel plugin alone does not stop the collector or its connections.
 while True:
+    # Wait for dom0 rather than running a separate sampling timer.
     command = sys.stdin.readline(16)
     if command != 'sample\n':
         break

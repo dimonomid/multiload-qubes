@@ -3,6 +3,7 @@ use super::*;
 use multiload_qubes_snapshot::{DomainUsage, DomainUsageSnapshot};
 use std::collections::BTreeMap;
 
+/// Select the domain measurements used by the shared percentage renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Metric {
     Swap,
@@ -26,6 +27,7 @@ impl Metric {
     }
 }
 
+/// Show RAM/swap coverage and highest users; totals cover reporting domains only.
 pub(crate) fn tooltip(usage: Option<&DomainUsageSnapshot>, metric: Metric) -> String {
     let label = metric.label();
     let Some(usage) = usage else {
@@ -79,6 +81,7 @@ pub(crate) fn tooltip(usage: Option<&DomainUsageSnapshot>, metric: Metric) -> St
     text
 }
 
+/// Rank by qube CPU pressure and also show each qube's share of the host.
 pub(crate) fn cpu_tooltip(cpu: Option<&multiload_qubes_snapshot::DomainCpuSnapshot>) -> String {
     let Some(cpu) = cpu else {
         return "Qube CPU: unavailable or warming up".into();
@@ -111,13 +114,16 @@ pub(crate) fn cpu_tooltip(cpu: Option<&multiload_qubes_snapshot::DomainCpuSnapsh
     text
 }
 
+/// One qube's visible line; missing reports leave holes rather than joining across them.
 struct Trace<'a> {
+    /// Qube name used to choose a stable line tint.
     name: &'a str,
+    /// Percentages at each visible column, with None for a gap.
     points: Vec<Option<f64>>,
 }
 
-// Match lines by domain ID and VM identity, not name. A restarted qube must
-// start a new line instead of connecting to its previous run.
+// Match lines by domain ID and VM identity, not name. A changed ID or identity
+// starts a new line rather than connecting to a different domain's history.
 fn traces<'a>(samples: &[Option<&'a Snapshot>], metric: Metric) -> BTreeMap<&'a str, Trace<'a>> {
     let mut traces = BTreeMap::new();
     for (i, sample) in samples.iter().enumerate() {
@@ -167,6 +173,7 @@ fn point_y(percent: f64, height: f64) -> f64 {
 }
 
 impl Graphs {
+    /// Draw separate qube lines and fill under the highest percentage in each column.
     pub(super) fn domain_chart(
         &self,
         cr: &cairo::Context,

@@ -22,14 +22,21 @@ const KEYS: [&str; 7] = [
     "Series3",
     "Missing",
 ];
+/// One named theme file; the filename uses an ID so display names can change.
 #[derive(Clone, Debug)]
 pub struct SavedTheme {
+    /// UUID used in the filename and panel references.
     pub id: String,
+    /// User-facing name, unique within the loaded store.
     pub name: String,
+    /// Complete color and border settings for all charts.
     pub palettes: Palettes,
 }
+/// Loaded named themes shared by the user's panel instances.
 pub struct ThemeStore {
+    /// Theme directory under GLib's user config directory, normally ~/.config.
     pub dir: PathBuf,
+    /// Valid themes sorted by name; malformed files are reported separately.
     pub themes: Vec<SavedTheme>,
 }
 pub fn reserved_name(name: &str) -> bool {
@@ -42,6 +49,7 @@ pub fn valid_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 impl SavedTheme {
+    /// Require a complete supported theme file; do not silently fill missing colors.
     fn decode(id: &str, data: &str) -> Result<Self, String> {
         if !glib::uuid_string_is_valid(id) {
             return Err("Invalid theme identifier".into());
@@ -113,6 +121,7 @@ impl ThemeStore {
     pub fn load() -> (Self, Vec<String>) {
         Self::load_from(glib::user_config_dir().join("multiload-qubes/themes"))
     }
+    /// Load valid files and return errors alongside them so one bad file does not hide others.
     pub fn load_from(dir: PathBuf) -> (Self, Vec<String>) {
         let mut store = Self {
             dir,
@@ -170,6 +179,7 @@ impl ThemeStore {
     pub fn by_name(&self, name: &str) -> Option<&SavedTheme> {
         self.themes.iter().find(|t| t.name == name)
     }
+    /// Create or replace a theme file before updating the in-memory store.
     pub fn write(
         &mut self,
         id: Option<&str>,
@@ -220,6 +230,7 @@ impl ThemeStore {
         self.sort();
         Ok(id)
     }
+    /// Remove a theme file and its loaded entry; an already missing file is harmless.
     pub fn delete(&mut self, id: &str) -> Result<(), String> {
         match fs::remove_file(self.path(id)?) {
             Ok(()) => (),
@@ -229,6 +240,7 @@ impl ThemeStore {
         self.themes.retain(|t| t.id != id);
         Ok(())
     }
+    /// Validate the UUID before using it as a filename.
     fn path(&self, id: &str) -> Result<PathBuf, String> {
         if !glib::uuid_string_is_valid(id) {
             return Err("Invalid theme identifier".into());
@@ -240,6 +252,7 @@ impl ThemeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Isolated theme store removed after the test.
     struct Temp(PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {

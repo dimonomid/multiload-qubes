@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class GuestScripts(unittest.TestCase):
     def check_requests(self, script):
+        """Require silence between requests, one reply per request, and exit on stdin EOF."""
         proc = subprocess.Popen([sys.executable, '-u', '-c', script],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)

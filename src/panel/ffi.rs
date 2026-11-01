@@ -18,19 +18,24 @@ use std::{
 /// Native callback table, exported to panel-api.h. All callbacks run on the GTK thread.
 #[repr(C)]
 pub struct HostApi {
+    /// Panel thickness in pixels; used for automatic chart sizing.
     size: unsafe extern "C" fn(*mut c_void) -> i32,
+    /// Nonzero when charts should stack vertically.
     vertical: unsafe extern "C" fn(*mut c_void) -> i32,
     // The widget is borrowed for the call; the container retains its own ref.
     attach: unsafe extern "C" fn(*mut c_void, *mut gtk::ffi::GtkWidget),
     // Returns NULL or an owned, g_free-compatible filename.
     path: unsafe extern "C" fn(*mut c_void, i32) -> *mut c_char,
+    /// Block or unblock XFCE's menu while a preferences dialog is open.
     block: unsafe extern "C" fn(*mut c_void, i32),
 }
 
 /// A non-owning GTK-thread host connection. It cannot be copied or constructed
 /// outside this module. Detaching makes subsequent calls harmless.
 pub(super) struct Host {
+    /// Borrowed native plugin, cleared before the native owner is destroyed.
     pointer: Cell<Option<NonNull<c_void>>>,
+    /// Static callback table supplied by the C adapter.
     api: &'static HostApi,
 }
 impl Host {
@@ -91,6 +96,7 @@ impl Host {
             }
         }
     }
+    /// Invalidate the borrowed host before returning control to native destruction.
     pub(super) fn detach(&self) {
         self.pointer.set(None);
     }
@@ -170,6 +176,7 @@ pub extern "C" fn mq_panel_about() {
 mod tests {
     use super::*;
     #[derive(Default)]
+    /// Native callback counts used to catch calls after the host is detached.
     struct Calls {
         size: Cell<u32>,
         vertical: Cell<u32>,

@@ -36,16 +36,21 @@ const REPORT_BURST: f64 = 8.0;
 pub const METRICS_SCRIPT: &str = include_str!("../../../guest/metrics.py");
 pub const NETWORK_SCRIPT: &str = include_str!("../../../guest/network.py");
 
+/// Quote the fixed Python source as one argument to the guest shell.
 pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// A worker's publication path and identity, both chosen before guest I/O.
 #[derive(Clone)]
 pub struct RawTarget {
+    /// Latest raw frame file for this reporter.
     pub path: PathBuf,
+    /// Qube identity attached to every reply from this connection.
     pub identity: QubeIdentity,
 }
 impl RawTarget {
+    /// Attach collector context and save bytes without interpreting the guest measurements.
     pub fn publish(&self, tick_id: &str, session: &str, payload: &[u8]) -> Result<(), String> {
         if payload.len() > MAX_REPORT_BYTES {
             return Err("oversized raw report".into());
@@ -62,13 +67,18 @@ impl RawTarget {
     }
 }
 
+/// Local command used to establish one persistent reporting connection.
 #[derive(Clone)]
 pub struct CommandSpec {
+    /// Human-readable source in diagnostics, separate from executable arguments.
     pub source: String,
+    /// Local executable, normally qvm-run.
     pub program: String,
+    /// Arguments including the fixed guest script and validated qube name.
     pub args: Vec<String>,
 }
 impl CommandSpec {
+    /// Open only the bundled reporter; do not allow guest data to choose a command.
     pub fn qube(name: &str, key: ReporterKey) -> Self {
         let script = match key {
             ReporterKey::QubeMetrics(_) => METRICS_SCRIPT,
@@ -94,9 +104,12 @@ impl CommandSpec {
     }
 }
 
+/// Worker timeout and reconnect policy, separate from the parser's reply deadline.
 #[derive(Clone, Copy)]
 pub struct Timing {
+    /// Maximum wait after sending a request; idle connections do not time out.
     pub stale: Duration,
+    /// Delay before opening a new connection after a failure.
     pub retry: Duration,
 }
 impl Default for Timing {
@@ -151,6 +164,7 @@ impl Drop for Process {
     }
 }
 
+/// Keep existing descriptor flags while making pipe I/O nonblocking.
 fn set_nonblocking(fd: &impl AsFd) -> Result<(), Errno> {
     let flags = OFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFL)?);
     fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
@@ -162,14 +176,20 @@ fn set_nonblocking(fd: &impl AsFd) -> Result<(), Errno> {
 #[derive(Default)]
 enum RequestState {
     #[default]
+    /// No connection is ready to accept a tick.
     Disconnected,
+    /// Connected with no outstanding request.
     Idle,
+    /// Reserved tick waiting for the worker to write sample to stdin.
     Queued(String),
+    /// Worker has taken this tick; it cannot accept another until reply or disconnect.
     Pending(String),
 }
 #[derive(Default)]
+/// Shared reservation slot between the sampling loop and one transport worker.
 struct Requests(Mutex<RequestState>);
 impl Requests {
+    /// Claim an idle connection before adding it to the tick's expected replies.
     fn reserve(&self, tick_id: &str) -> bool {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(*state, RequestState::Idle) {
@@ -182,6 +202,7 @@ impl Requests {
     fn ready(&self) {
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = RequestState::Idle;
     }
+    /// Move a queued tick to pending before the worker writes its request.
     fn take(&self) -> Option<String> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let RequestState::Queued(tick_id) = &*state {
@@ -192,6 +213,7 @@ impl Requests {
             None
         }
     }
+    /// Clear the reservation and return any tick that needs an unavailable reply.
     fn disconnect(&self) -> Option<String> {
         match std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner())) {
             RequestState::Queued(tick_id) | RequestState::Pending(tick_id) => Some(tick_id),
@@ -210,13 +232,18 @@ enum LogEvent {
 /// Owns a reporting worker. Dropping it requests a stop and waits for the worker.
 /// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
+    /// Single request slot; prevents queuing ticks behind a busy guest.
     requested: Arc<Requests>,
+    /// Shared stop flag, checked during I/O polling and retry waits.
     stop: Arc<AtomicBool>,
     #[cfg(test)]
+    /// Test observations of normal diagnostics; absent from production builds.
     log_rx: Receiver<LogEvent>,
+    /// Owned worker, joined on drop after requesting shutdown.
     thread: Option<JoinHandle<()>>,
 }
 impl Reader {
+    /// Start a worker that owns reconnects, pipe I/O, and local process cleanup.
     pub fn spawn(spec: CommandSpec, timing: Timing, target: RawTarget) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let requested = Arc::new(Requests::default());
@@ -277,6 +304,7 @@ impl Reader {
     pub fn request(&self, tick_id: &str) -> bool {
         !self.stop.load(Ordering::Relaxed) && self.requested.reserve(tick_id)
     }
+    /// Request shutdown without waiting; stop all readers before joining them.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -293,6 +321,7 @@ impl Drop for Reader {
     }
 }
 
+/// Run one connection until stop or failure; only framing and traffic limits are checked here.
 fn session(
     spec: &CommandSpec,
     timing: Timing,
@@ -402,6 +431,7 @@ mod tests {
 
     const REPORTER: &str = "import sys\nfor command in sys.stdin:\n assert command == 'sample\\n'\n print('opaque reply',flush=True)";
 
+    /// Exercise a requested failure and verify that its local child is reaped.
     fn session_error(script: &str, stale: Duration) -> String {
         let attempts = Attempts::new();
         let reader = attempts.start(
@@ -604,6 +634,7 @@ mod tests {
             retry: Duration::from_millis(40),
         }
     }
+    /// Temporary raw-output directory and PID log for real local reporter processes.
     struct Attempts(std::path::PathBuf);
     impl Attempts {
         fn new() -> Self {
@@ -661,6 +692,7 @@ mod tests {
         fn start(&self, body: &str, timing: Timing) -> Reader {
             Reader::spawn(spec(&self.script(body)), timing, self.target()).unwrap()
         }
+        /// Wait for a publication belonging to this tick, ignoring the previous file.
         fn frame(&self, tick_id: &str) -> RawFrame {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
@@ -696,6 +728,7 @@ mod tests {
         }
     }
 
+    /// Wait for a real connection reservation rather than assuming a startup delay.
     fn request_when_ready(reader: &Reader, tick_id: &str) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !reader.request(tick_id) {

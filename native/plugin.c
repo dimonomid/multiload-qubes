@@ -9,6 +9,7 @@ static int mq_xfce_size(void *host) { return xfce_panel_plugin_get_size(XFCE_PAN
 static int mq_xfce_vertical(void *host) {
     return xfce_panel_plugin_get_orientation(XFCE_PANEL_PLUGIN(host)) == GTK_ORIENTATION_VERTICAL;
 }
+/* Returned filenames are GLib-owned allocations; Rust takes and frees them. */
 static char *mq_xfce_path(void *host, int save) {
     XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     return save ? xfce_panel_plugin_save_location(plugin, TRUE) : xfce_panel_plugin_lookup_rc_file(plugin);
@@ -17,6 +18,7 @@ static void mq_xfce_block(void *host, int block) {
     XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     if (block) xfce_panel_plugin_block_menu(plugin); else xfce_panel_plugin_unblock_menu(plugin);
 }
+/* Register the drawing area for XFCE button events as well as adding it to the container. */
 static void mq_xfce_attach(void *host, GtkWidget *widget) {
     XfcePanelPlugin *plugin = XFCE_PANEL_PLUGIN(host);
     gtk_container_add(GTK_CONTAINER(plugin), widget);
@@ -25,6 +27,7 @@ static void mq_xfce_attach(void *host, GtkWidget *widget) {
     xfce_panel_plugin_menu_show_configure(plugin);
     xfce_panel_plugin_menu_show_about(plugin);
 }
+/* C holds one Rust reference until free-data; the other callbacks only borrow it. */
 static void released(XfcePanelPlugin *plugin, const void *state) { (void)plugin; mq_panel_free(state); }
 static void save(XfcePanelPlugin *plugin, const void *state) { (void)plugin; mq_panel_save(state); }
 static void configure(XfcePanelPlugin *plugin, const void *state) { (void)plugin; mq_panel_configure(state); }

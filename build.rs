@@ -4,6 +4,7 @@ fn main() {
     generate_panel_header();
 }
 
+// Generate the adapter's C declarations from the Rust ABI in panel builds only.
 #[cfg(feature = "panel")]
 fn generate_panel_header() {
     use std::path::PathBuf;

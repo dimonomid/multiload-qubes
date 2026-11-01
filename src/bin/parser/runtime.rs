@@ -11,25 +11,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
+/// Parsing state retained across ticks for one reporter connection.
 struct Report {
+    /// Qube whose counters this state belongs to.
     identity: QubeIdentity,
+    /// Connection key; changing it discards the old network baseline.
     session: String,
+    /// Receipt time of the last parsed frame, used to avoid parsing it twice.
     timestamp: f64,
+    /// Protocol checks and previous network counters.
     tracker: Tracker,
+    /// Result for timestamp; None also covers valid network warmup.
     reading: Option<Reading>,
+    /// Last logged parse error, so repeated failures do not flood the journal.
     last_error: Option<String>,
 }
+/// Per-reporter parsing state reused across ticks; pending replies live in PendingTick.
 #[derive(Default)]
 struct Parser {
+    /// Trackers for current reporters, pruned when host identities or options change.
     reports: BTreeMap<ReporterKey, Report>,
 }
 
+/// Host data and terminal replies for the one tick being assembled.
 struct PendingTick {
+    /// Root-owned host sample and its shared reply deadline.
     frame: HostFrame,
     // None is a terminal reply with no valid measurement (including network warmup).
     replies: BTreeMap<ReporterKey, Option<Reading>>,
 }
 impl PendingTick {
+    /// Read and validate host.json before accepting its tick or measurements.
     fn load(input: &Path, now: f64) -> Result<Self, String> {
         let frame: HostFrame = serde_json::from_slice(&handoff::read_bounded(
             &input.join("host.json"),
@@ -47,9 +59,11 @@ impl PendingTick {
             replies: BTreeMap::new(),
         })
     }
+    /// Invalid replies and network warmup count as finished too.
     fn complete(&self) -> bool {
         self.replies.len() == self.frame.tick.expected.len()
     }
+    /// Build output from this tick only; do not reuse older RAM or rate readings.
     fn snapshot(&self) -> Result<Snapshot, String> {
         let memory: BTreeMap<_, _> = eligible(&self.frame.sample.host)
             .keys()
@@ -67,6 +81,7 @@ impl PendingTick {
 }
 
 impl Parser {
+    /// Reset state on identity/session changes and log each distinct error once.
     fn parse(&mut self, key: ReporterKey, frame: RawFrame) -> Option<Reading> {
         let report = self.reports.entry(key).or_insert_with(|| Report {
             identity: frame.identity.clone(),
@@ -108,6 +123,7 @@ impl Parser {
         report.reading
     }
 
+    /// Accept one matching, on-time reply; unrelated or late files leave the tick waiting.
     fn ingest(&mut self, input: &Path, pending: &mut PendingTick, key: ReporterKey) {
         // A recognized reporter may still be busy with an older tick. Only
         // connections accepted for this tick belong in its result.
@@ -148,12 +164,14 @@ impl Parser {
         };
         pending.replies.insert(key, reading);
     }
+    /// Check expected files after loading host.json or before closing a timed-out tick.
     fn rescan(&mut self, input: &Path, pending: &mut PendingTick) {
         let keys: Vec<_> = pending.frame.tick.expected.keys().copied().collect();
         for key in keys {
             self.ingest(input, pending, key);
         }
     }
+    /// Drop baselines belonging to stopped qubes, replaced connections, or disabled reporters.
     fn prune(&mut self, frame: &HostFrame) {
         let active = eligible(&frame.sample.host);
         self.reports.retain(|key, report| match key {
@@ -168,11 +186,15 @@ impl Parser {
     }
 }
 
+/// Paths supplied by the parser service command line.
 pub struct Options {
+    /// Root-owned directory containing host.json and raw/.
     pub input: PathBuf,
+    /// Combined snapshot read by the panel.
     pub output: PathBuf,
 }
 
+/// Wait for file changes and tick deadlines, publishing at most once per tick.
 pub fn run(options: Options) -> Result<(), String> {
     let shutdown = shutdown::Shutdown::register().map_err(|e| e.to_string())?;
     let watch =
@@ -303,6 +325,7 @@ pub fn run(options: Options) -> Result<(), String> {
     Ok(())
 }
 
+/// Preserve the host timestamp when publishing the combined snapshot.
 fn publish_tick(output: &Path, tick: &PendingTick) -> Result<(), String> {
     publish(
         output,

@@ -19,23 +19,33 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Xen measurements and state for one domain, including dom0 and stub domains.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Domain {
+    /// Current Xen domain ID; Xen may reuse it after the domain exits.
     pub id: u32,
     /// XenStore VM identity, without a domain ID prefix.
     pub identity: String,
+    /// Name read by the collector, used for connections and chart labels.
     pub name: String,
+    /// Cumulative scheduled CPU time across all vCPUs, in nanoseconds.
     pub cpu_ns: u64,
+    /// Online vCPU count; absent when Xen cannot provide vCPU details.
     pub vcpus: Option<u32>,
+    /// Current Xen RAM allocation in KiB, including unused pages.
     pub allocated: u64,
+    /// Paused domains keep their allocation but cannot answer requests.
     pub paused: bool,
+    /// Domains in shutdown are excluded from guest requests.
     pub shutdown: bool,
+    /// Domain ID of this domain's device model, if it has one.
     pub stubdom: Option<u32>,
 }
 /// Match both fields when associating a report with a qube. Xen can reuse a
 /// domain ID for another qube; the ID alone does not establish identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct QubeIdentity {
+    /// Xen domain ID observed alongside the VM identity.
     pub domain_id: u32,
     /// VM identity from XenStore, commonly /vm/<uuid>.
     pub uuid: String,
@@ -55,28 +65,41 @@ impl Domain {
     }
 }
 
+/// Host totals and domain list from one Xen sample.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Host {
+    /// Physical host RAM in KiB.
     pub total: u64,
+    /// RAM not allocated by Xen, in KiB.
     pub free: u64,
+    /// Host logical CPU count, including SMT threads.
     pub cpus: u32,
+    /// Domains seen during this sample, including dom0.
     pub domains: Vec<Domain>,
 }
 
 /// Host measurements from one tick, before qube replies are combined with them.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostSample {
+    /// Unix time of this host sample, in seconds; the parser preserves it.
     pub timestamp: f64,
+    /// Configured collection interval in seconds, not the measured CPU window.
     pub period: f64,
+    /// Xen totals and current domain state.
     pub host: Host,
+    /// Whole-machine CPU percentage; absent until a counter delta is available.
     pub cpu: Option<f64>,
+    /// CPU deltas and vCPU budgets for the same measurement window.
     pub qube_cpu: Option<DomainCpuSnapshot>,
+    /// Physical disk counters converted to rates; absent on collection failure.
     pub disk: Option<DiskSnapshot>,
     /// Total and used KiB from dom0's /proc/meminfo.
     pub dom0_ram: (u64, u64),
+    /// Swap capacity and occupied swap in KiB from dom0.
     pub dom0_swap: (u64, u64),
 }
 impl HostSample {
+    /// Check host values before accepting them as parser input.
     pub fn validate(&self) -> Result<(), String> {
         multiload_qubes_snapshot::validate_sample_header(self.timestamp, self.period, self.cpu)
             .map_err(|e| e.to_string())?;
@@ -102,6 +125,7 @@ impl HostSample {
         }
         Ok(())
     }
+    /// Combine this host sample with replies from its tick; missing replies stay unknown.
     pub fn snapshot(
         &self,
         readings: &BTreeMap<u32, Reading>,
@@ -162,9 +186,12 @@ impl HostSample {
 /// Name and identity used to manage a connection to an eligible qube.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Qube {
+    /// Both parts must match before reusing a connection.
     pub identity: QubeIdentity,
+    /// Validated name passed to qvm-run.
     pub name: String,
 }
+/// Choose running domains that can host the bundled Linux reporters.
 pub fn eligible(host: &Host) -> BTreeMap<u32, Qube> {
     // Stub domains run device models, not a normal guest reporter. Their RAM
     // still counts toward host allocation, but its used amount stays unknown.
@@ -191,6 +218,7 @@ pub fn eligible(host: &Host) -> BTreeMap<u32, Qube> {
         .collect()
 }
 
+/// Include dom0 and valid replies, while counting missing eligible qubes in coverage.
 fn domain_snapshot(
     host: &Host,
     dom0: (u64, u64),
@@ -219,6 +247,7 @@ fn domain_snapshot(
         entries,
     }
 }
+/// Use per-domain swap capacity as the denominator; disabled swap remains a valid entry.
 pub fn swap_snapshot(
     host: &Host,
     dom0: (u64, u64),
@@ -229,6 +258,7 @@ pub fn swap_snapshot(
         _ => None,
     })
 }
+/// Use current guest-visible totals, which may change as Xen balloons a qube.
 pub fn ram_snapshot(
     host: &Host,
     dom0: (u64, u64),
@@ -244,6 +274,7 @@ pub fn publish(path: &Path, text: &str) -> Result<(), String> {
     publish_bytes(path, text.as_bytes())
 }
 
+/// Replace a complete file by rename; readers never see a partially written publication.
 pub fn publish_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()

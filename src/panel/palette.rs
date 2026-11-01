@@ -27,14 +27,17 @@ impl BuiltinTheme {
     }
 }
 
+/// Packed RRGGBBAA colors and border width for one chart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Palette {
     // Border, background top/bottom, three series, then missing data.
     // Per-qube charts use series 1 for lines and series 2 for the peak fill.
     pub colors: [u32; 7],
+    /// Border width in pixels; zero draws no border.
     pub border: u32,
 }
 impl Palette {
+    /// Choose chart-specific series colors within a built-in theme.
     pub fn preset(preset: BuiltinTheme, kind: ChartKind) -> Self {
         if preset == BuiltinTheme::LightGradient {
             return Self::light_gradient(kind);
@@ -124,6 +127,7 @@ pub(super) fn source(cr: &cairo::Context, color: u32) {
     );
 }
 
+/// Interpolate all four packed channels, including alpha, for background gradients.
 pub(super) fn mix(a: u32, b: u32, t: f64) -> u32 {
     [24, 16, 8, 0].into_iter().fold(0, |out, shift| {
         let start = ((a >> shift) & 255) as f64;

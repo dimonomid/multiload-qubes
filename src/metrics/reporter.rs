@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
+/// Stream selector used in internal maps, raw filenames, and tick manifest keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 // JSON map keys must be strings. These Serde hooks use Display/FromStr through
 // the From/TryFrom adapters, keeping filenames and manifest keys in the same form.

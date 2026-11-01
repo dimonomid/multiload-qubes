@@ -10,10 +10,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+/// Watch the metrics directory and its parent so service restarts do not lose the watch.
 struct Watcher {
+    /// Nonblocking descriptor integrated into the GTK main loop.
     inotify: Inotify,
+    /// Watch for removal or recreation of the service runtime directory.
     parent: WatchDescriptor,
+    /// Current metrics-directory watch, absent while that directory is missing.
     directory: Cell<Option<WatchDescriptor>>,
+    /// Snapshot filename to filter from directory events.
     path: PathBuf,
 }
 impl Watcher {
@@ -42,6 +47,7 @@ impl Watcher {
         watcher.attach();
         Ok(watcher)
     }
+    /// Replace the directory watch; a missing runtime directory is expected while stopped.
     fn attach(&self) {
         if let Some(old) = self.directory.take() {
             let _ = self.inotify.rm_watch(old);
@@ -56,6 +62,7 @@ impl Watcher {
                 .ok(),
         );
     }
+    /// Drain notifications and report whether the metrics file may need a read.
     fn changed(&self) -> Result<bool, String> {
         let events = match self.inotify.read_events() {
             Ok(events) => events,
@@ -91,9 +98,13 @@ impl Watcher {
     }
 }
 
+/// Learn publication spacing and allow twice that interval before drawing a gap.
 struct Cadence {
+    /// Last live arrival; cleared during downtime so recovery does not learn a long gap.
     last: Option<Instant>,
+    /// Last useful interval, retained while the service is silent.
     interval: Duration,
+    /// Collector period from the last sample, used to detect configuration changes.
     advertised: Option<Duration>,
 }
 impl Default for Cadence {
@@ -106,6 +117,7 @@ impl Default for Cadence {
     }
 }
 impl Cadence {
+    /// Learn arrival spacing without treating downtime or compressed catch-up as the cadence.
     fn received(&mut self, now: Instant, period: f64) {
         let advertised = Duration::from_secs_f64(period);
         // Use the collector's interval until two arrivals can be compared, and
@@ -126,20 +138,29 @@ impl Cadence {
     fn timeout(&self) -> Duration {
         self.interval.saturating_mul(2)
     }
+    /// Forget the last arrival while retaining the interval for further gap columns.
     fn missing(&mut self) {
         self.last = None;
     }
 }
 
+/// GTK-thread subscription: new files add samples; silence adds missing-data columns.
 pub(super) struct Feed {
+    /// Directory watches used to follow atomic replacements.
     watcher: Watcher,
+    /// GLib descriptor callback, removed on drop.
     source: RefCell<Option<SourceId>>,
+    /// One silence timer, replaced on each accepted publication.
     timer: RefCell<Option<SourceId>>,
+    /// Observed spacing and timeout policy.
     cadence: RefCell<Cadence>,
+    /// Last file already delivered; duplicate notifications do not add columns.
     version: Cell<Option<InputVersion>>,
+    /// Receives a fresh snapshot or None for a missing-data column.
     callback: Box<dyn Fn(Option<Snapshot>)>,
 }
 impl Feed {
+    /// Install watches before reading the initial file, then arm the silence timer.
     pub fn start(
         path: &Path,
         callback: impl Fn(Option<Snapshot>) + 'static,
@@ -182,6 +203,7 @@ impl Feed {
         }
         Ok(feed)
     }
+    /// Deliver only a fresh, valid file version and reset the silence timer.
     fn read(self: &Rc<Self>) -> bool {
         let Some((sample, version)) = Graphs::read_snapshot(&self.watcher.path) else {
             return false;
@@ -199,6 +221,7 @@ impl Feed {
         self.arm(timeout);
         true
     }
+    /// Replace the one-shot timer; its callback uses a weak owner to avoid a reference cycle.
     fn arm(self: &Rc<Self>, delay: Duration) {
         if let Some(timer) = self.timer.borrow_mut().take() {
             timer.remove();
@@ -234,6 +257,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// Temporary runtime directory that tests may delete and recreate under a live watch.
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {

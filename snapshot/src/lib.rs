@@ -1,5 +1,10 @@
-//! Shared collector/panel file contract, independent of Xen and GTK/Cairo.
+//! Snapshot data and the text file format used between the services and panel.
+//! This crate has no Xen or GTK/Cairo dependencies.
 //! RAM/swap use KiB; per-domain CPU uses scheduled ns / vCPU budget ns.
+//!
+//! Each file contains one line with space-separated fields. The first field is
+//! a format version tag (currently `MQ6`), so readers can reject incompatible files.
+//! Missing measurements use placeholders to keep the field positions fixed.
 use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,16 +20,20 @@ pub fn max_sample_age(period: f64) -> f64 {
     (period * 4.0).max(5.0)
 }
 
+/// One domain's usage and capacity; the containing metric determines the units.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainUsage {
-    /// Domain incarnation key: a restarted qube starts a new line segment.
+    /// Chart key combining domain ID and VM identity, or "dom0" for dom0.
     pub id: String,
     /// Validated dom0-sourced qube name (never a guest-provided label).
     pub name: String,
+    /// Capacity in KiB for RAM/swap, or window times online vCPUs in ns for CPU.
     pub total: u64,
+    /// Used KiB for RAM/swap, or scheduled nanoseconds for CPU.
     pub used: u64,
 }
 impl DomainUsage {
+    /// A zero capacity, such as disabled swap, has no meaningful percentage.
     pub fn percent(&self) -> Option<f64> {
         (self.total > 0).then(|| self.used as f64 / self.total as f64 * 100.0)
     }
@@ -36,6 +45,7 @@ impl DomainUsage {
 pub struct DomainUsageSnapshot {
     /// Number of running, eligible guests plus dom0, including missing reports.
     pub expected: u32,
+    /// Only domains with measurements for this sample; missing domains are omitted.
     pub entries: Vec<DomainUsage>,
 }
 impl DomainUsageSnapshot {
@@ -46,6 +56,7 @@ impl DomainUsageSnapshot {
             .filter_map(DomainUsage::percent)
             .reduce(f64::max)
     }
+    /// Check labels, unique identities, coverage and totals; swap may have zero capacity.
     fn validate(&self, require_nonzero_total: bool) -> Result<(), SnapshotError> {
         let mut ids = std::collections::BTreeSet::new();
         let mut names = std::collections::BTreeSet::new();
@@ -79,20 +90,26 @@ impl DomainUsageSnapshot {
     }
 }
 
+/// Per-domain scheduled CPU time with enough context to show qube and host percentages.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DomainCpuSnapshot {
     /// Sampling window in nanoseconds; entries use scheduled CPU ns / vCPU budget ns.
     pub window_ns: u64,
+    /// Logical host CPU count used to express a qube's share of the whole machine.
     pub host_cpus: u32,
+    /// Capacity and scheduled time in nanoseconds for each reporting domain.
     pub usage: DomainUsageSnapshot,
 }
 impl DomainCpuSnapshot {
+    /// Recover the online vCPU count from a validated entry's CPU budget.
     pub fn vcpus(&self, entry: &DomainUsage) -> u64 {
         entry.total / self.window_ns
     }
+    /// Express scheduled time as a percentage of all host logical CPUs.
     pub fn host_percent(&self, entry: &DomainUsage) -> f64 {
         entry.used as f64 / self.window_ns as f64 / self.host_cpus as f64 * 100.0
     }
+    /// Check the CPU window and require each budget to be a whole number of vCPUs.
     pub fn validate(&self) -> Result<(), SnapshotError> {
         if self.window_ns == 0
             || self.window_ns > 60_000_000_000
@@ -122,13 +139,16 @@ pub fn disk_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-!.".contains(&b))
 }
 
+/// Physical disks selected by the collector and their combined activity.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiskSnapshot {
+    /// Kernel device names; an empty list means no supported disks were found.
     pub devices: Vec<String>,
     /// Read/write bytes per second. None means warming up or no selected devices.
     pub rates: Option<(f64, f64)>,
 }
 
+/// Measurements for one collection tick; each metric can be unavailable independently.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     /// Unix timestamp in seconds; the wire format uses six fractional digits.
@@ -155,14 +175,20 @@ pub struct Snapshot {
     pub disk: Option<DiskSnapshot>,
     /// Current guest-visible RAM totals and usage, including dom0, in KiB.
     pub qube_ram: Option<DomainUsageSnapshot>,
+    /// Per-domain CPU deltas and budgets, including dom0; absent during warmup.
     pub qube_cpu: Option<DomainCpuSnapshot>,
 }
 
+/// Wire, value, or age check that prevented a snapshot from being accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
+    /// Input or encoded output exceeds the shared byte limit.
     TooLarge,
+    /// Unsupported version or wrong number of wire fields.
     InvalidFormat,
+    /// The named field violates the value or consistency checks.
     InvalidField(&'static str),
+    /// Timestamp is too old or too far ahead of the reader's clock.
     Stale,
 }
 impl fmt::Display for SnapshotError {
@@ -177,6 +203,7 @@ impl fmt::Display for SnapshotError {
 }
 impl std::error::Error for SnapshotError {}
 
+/// Wall-clock seconds shared by publications and freshness checks.
 pub fn unix_time_now() -> Result<f64, SnapshotError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -194,6 +221,7 @@ fn encode_rates(rates: Option<(f64, f64)>) -> String {
         |(a, b)| format!("{a:.3} {b:.3}"),
     )
 }
+/// Both fields must be unavailable together; mixed fields fail numeric parsing.
 fn decode_rates(a: &str, b: &str) -> Result<Option<(f64, f64)>, SnapshotError> {
     if a == "unknown" && b == "unknown" {
         Ok(None)
@@ -205,6 +233,7 @@ fn decode_rates(a: &str, b: &str) -> Result<Option<(f64, f64)>, SnapshotError> {
     }
 }
 
+/// Keep missing groups distinct from a present group with no entries.
 fn encode_domains(usage: Option<&DomainUsageSnapshot>) -> String {
     let Some(usage) = usage else {
         return "unknown -".into();
@@ -221,6 +250,7 @@ fn encode_domains(usage: Option<&DomainUsageSnapshot>) -> String {
     };
     format!("{} {entries}", usage.expected)
 }
+/// Read bounded domain records; value and identity checks follow in validation.
 fn decode_domains(
     expected: &str,
     entries: &str,
@@ -256,7 +286,7 @@ fn decode_domains(
     }))
 }
 
-/// Check the fields shared by a host sample and its final snapshot.
+/// Check timing and whole-host CPU values shared by HostSample and Snapshot.
 pub fn validate_sample_header(
     timestamp: f64,
     period: f64,
@@ -284,6 +314,7 @@ pub fn check_freshness(timestamp: f64, period: f64, now: f64) -> Result<(), Snap
 }
 
 impl DiskSnapshot {
+    /// Check device names, uniqueness and finite rates before drawing or encoding them.
     pub fn validate(&self) -> Result<(), SnapshotError> {
         let names: std::collections::BTreeSet<_> = self.devices.iter().collect();
         if self.devices.len() > MAX_DISK_DEVICES
@@ -340,7 +371,7 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Every metric has a fixed position, including when it is unavailable.
+    /// Validate and write one snapshot line, keeping placeholders for missing measurements.
     pub fn encode(&self) -> Result<String, SnapshotError> {
         self.validate()?;
         let cpu = self
@@ -387,7 +418,8 @@ impl Snapshot {
         Ok(line)
     }
 
-    /// Decode MQ6. Readers check freshness separately.
+    /// Parse a snapshot line and validate its version, fields and values.
+    /// Readers check freshness separately.
     pub fn decode(text: &str) -> Result<Self, SnapshotError> {
         if text.len() > MAX_WIRE_BYTES {
             return Err(SnapshotError::TooLarge);
@@ -451,8 +483,8 @@ impl Snapshot {
         Self::decode_fresh_at(text, unix_time_now()?)
     }
 
-    /// Same freshness policy as the original panel: five seconds of future clock
-    /// tolerance, and max(5 seconds, four collection intervals) of age tolerance.
+    /// Decode against a supplied wall clock, allowing five seconds of future clock
+    /// tolerance and max(5 seconds, four collection intervals) of age.
     pub fn decode_fresh_at(text: &str, now: f64) -> Result<Self, SnapshotError> {
         let snapshot = Self::decode(text)?;
         check_freshness(snapshot.timestamp, snapshot.period, now)?;

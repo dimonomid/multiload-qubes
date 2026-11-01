@@ -10,6 +10,7 @@ use super::{
 use gtk::prelude::*;
 use std::{cell::Cell, rc::Rc};
 
+/// Expected modal dialogs and the responses sent while their nested GTK loops run.
 #[derive(Clone)]
 enum Prompt {
     Name(&'static str),
@@ -27,6 +28,7 @@ fn find_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
         .iter()
         .find_map(find_entry)
 }
+/// Schedule responses before clicking a button whose handler may enter a modal loop.
 fn prompts(steps: Vec<Prompt>) -> Rc<Cell<usize>> {
     let next = Rc::new(Cell::new(0));
     let progress = next.clone();
@@ -80,10 +82,12 @@ fn prefs(panel: &Rc<Panel>) -> Rc<Preferences> {
     panel.configure();
     panel.preferences.borrow().as_ref().unwrap().clone()
 }
+/// Emit the user signal too; setting a color alone does not exercise the edit handler.
 fn emit_color(prefs: &Preferences, f: usize, value: gtk::gdk::RGBA) {
     prefs.colors[f].set_rgba(&value);
     prefs.colors[f].emit_by_name::<()>("color-set", &[]);
 }
+/// Run the click synchronously and check that every expected prompt was consumed.
 fn click(button: &gtk::Button, steps: Vec<Prompt>) {
     let count = steps.len();
     let progress = prompts(steps);

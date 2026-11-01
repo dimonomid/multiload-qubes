@@ -5,6 +5,7 @@
 use super::{handoff::MAX_REPORT_BYTES, ReporterKey};
 use std::collections::BTreeMap;
 
+/// Accept bounded decimal integers without signs or alternate bases.
 pub fn number(value: &str) -> Result<u64, String> {
     if value.is_empty() || value.len() > 20 || !value.bytes().all(|c| c.is_ascii_digit()) {
         return Err("invalid unsigned integer".into());
@@ -16,6 +17,7 @@ pub fn number(value: &str) -> Result<u64, String> {
     Ok(n)
 }
 
+/// Check names before using them in guest connections and chart labels.
 pub fn qube_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 31
@@ -25,6 +27,7 @@ pub fn qube_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+/// Use MemAvailable rather than MemFree so reclaimable caches are not treated as pressure.
 pub fn memory_used(total: &str, available: &str) -> Result<u64, String> {
     let total = number(total)?;
     let available = number(available)?;
@@ -34,6 +37,7 @@ pub fn memory_used(total: &str, available: &str) -> Result<u64, String> {
     Ok(total - available)
 }
 
+/// Read total and used RAM in KiB from /proc/meminfo.
 pub fn dom0_memory(text: &str) -> Result<(u64, u64), String> {
     let mut total = None;
     let mut available = None;
@@ -64,6 +68,7 @@ pub fn swap_usage(total: &str, free: &str) -> Result<(u64, u64), String> {
     Ok((total, total - free))
 }
 
+/// Read total and occupied swap in KiB from /proc/meminfo.
 pub fn dom0_swap(text: &str) -> Result<(u64, u64), String> {
     let mut fields = BTreeMap::new();
     for line in text.lines() {
@@ -79,21 +84,30 @@ pub fn dom0_swap(text: &str) -> Result<(u64, u64), String> {
     )
 }
 
+/// A validated measurement; missing rates are represented outside this enum.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reading {
+    /// Guest-visible RAM and optional swap usage, all in KiB.
     Memory {
+        /// MemTotal minus MemAvailable, so reclaimable caches count as available.
         used: u64,
+        /// RAM capacity visible inside the qube.
         total: u64,
+        /// Capacity and occupied slots; absent in older M1 replies.
         swap: Option<(u64, u64)>,
     },
+    /// Incoming and outgoing bytes per second across the selected interfaces.
     Network(f64, f64),
 }
 
+// Guest monotonic nanoseconds, boot ID, then interface index -> RX/TX byte counters.
 type NetworkFrame = (u64, String, BTreeMap<u64, (u64, u64)>);
+/// State for one reporter connection; only network reports need a previous sample.
 pub struct Tracker {
     // The key chooses the format and expected domain ID. The parser checks
     // UUID/session changes separately and replaces the tracker when they change.
     key: ReporterKey,
+    /// Last valid network counters, also replaced when a reset prevents a rate.
     previous: Option<NetworkFrame>,
 }
 

@@ -10,9 +10,12 @@ const CAPTURE_LIMIT: usize = 4096;
 const LOG_LIMIT: usize = 1024;
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 
+/// Keep a bounded stderr tail for failures without letting a full pipe block the guest.
 #[derive(Default)]
 pub(super) struct StderrCapture {
+    /// Newest stderr bytes, still untrusted and not yet safe for the journal.
     tail: Vec<u8>,
+    /// Whether any older bytes were discarded.
     truncated: bool,
 }
 
@@ -46,6 +49,7 @@ impl StderrCapture {
         Ok(())
     }
 
+    /// Strip terminal escapes and controls, then bound the ASCII text sent to the journal.
     fn excerpt(&self) -> Option<String> {
         let stripped = strip_ansi_escapes::strip(&self.tail);
         let mut text = String::new();
@@ -83,6 +87,7 @@ impl StderrCapture {
         })
     }
 
+    /// Add bounded stderr and a briefly awaited exit status without reaping the owned process.
     pub fn failure_details(
         &mut self,
         reason: &str,

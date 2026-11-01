@@ -22,20 +22,33 @@ use std::{
     time::Duration,
 };
 
+/// One panel item and its GTK-thread state; callbacks use weak references to it.
 pub(super) struct Panel {
+    /// Borrowed XFCE connection; absent in the standalone preview.
     host: Option<Host>,
+    /// Single drawing and tooltip surface for all enabled charts.
     area: gtk::DrawingArea,
+    /// Visible history and current rendering colors, including unsaved previews.
     graphs: RefCell<Graphs>,
+    /// Committed settings; Cancel restores appearance from this copy.
     config: RefCell<Config>,
+    /// Stack charts vertically when the XFCE panel orientation is vertical.
     vertical: Cell<bool>,
+    /// Demo animation source only; live data arrives through updates.
     timer: RefCell<Option<glib::SourceId>>,
+    /// Live file subscription, stopped during shutdown.
     updates: RefCell<Option<Rc<updates::Feed>>>,
+    /// At most one open editor, whose owner reference is weak.
     preferences: RefCell<Option<Rc<preferences::Preferences>>>,
+    /// Stops callbacks from using a panel removed during a nested GTK dialog.
     closed: Cell<bool>,
+    /// Track the paired XFCE menu block/unblock calls.
     menu_blocked: Cell<bool>,
+    /// Use generated data without reading the services' output.
     demo: bool,
 }
 impl Panel {
+    /// Load per-instance settings, connect widgets, and start either live input or demo updates.
     fn new(host: Option<Host>, demo: bool) -> Rc<Self> {
         let panel = Rc::new(Self {
             host,
@@ -136,6 +149,7 @@ impl Panel {
         panel.area.show();
         panel
     }
+    /// Balance XFCE menu blocking while Preferences is open.
     fn block_menu(&self, block: bool) {
         if self.closed.get() || self.menu_blocked.replace(block) == block {
             return;
@@ -144,6 +158,7 @@ impl Panel {
             host.set_menu_blocked(block);
         }
     }
+    /// Persist a proposed config without changing the committed in-memory copy.
     fn save_config(&self, config: &Config) -> Result<(), String> {
         // The standalone preview has no panel settings file to persist.
         let Some(host) = &self.host else {
@@ -167,6 +182,7 @@ impl Panel {
         self.area.trigger_tooltip_query();
         self.area.queue_draw();
     }
+    /// Request space for the enabled charts and trim history to the new width.
     fn resize(&self) {
         let size = self.host.as_ref().map_or(48, Host::size);
         let config = self.config.borrow();
@@ -184,6 +200,7 @@ impl Panel {
         self.fit_history(w);
         self.area.set_size_request(w, h);
     }
+    /// Keep at most one historical sample per horizontal pixel in a chart.
     fn fit_history(&self, width: i32) {
         let count = self
             .config
@@ -200,6 +217,7 @@ impl Panel {
         };
         self.graphs.borrow_mut().set_history_width(chart_width);
     }
+    /// Handle orientation changes and size-only notifications through the same layout code.
     fn size_changed(&self, vertical: Option<bool>) {
         if let Some(vertical) = vertical {
             self.vertical.set(vertical);
@@ -221,6 +239,7 @@ impl Panel {
         });
         *self.timer.borrow_mut() = Some(timer);
     }
+    /// Present the existing editor or open one, blocking the XFCE menu while it is open.
     fn configure(self: &Rc<Self>) {
         let existing = self.preferences.borrow().clone();
         if let Some(prefs) = existing {
@@ -232,6 +251,7 @@ impl Panel {
         *self.preferences.borrow_mut() = Some(prefs.clone());
         prefs.show();
     }
+    /// Stop sources and close dialogs before detaching the borrowed native plugin.
     fn shutdown(&self) {
         self.block_menu(false);
         self.closed.set(true);
@@ -267,6 +287,7 @@ fn draw_graphs(
         eprintln!("Cannot draw Multiload graphs: {error}");
     }
 }
+/// Use the drawing layout to find the chart and tooltip rectangle under the pointer.
 fn chart_at(
     kinds: &[ChartKind],
     vertical: bool,

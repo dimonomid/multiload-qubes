@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
+/// Opened file's device, inode, and mtime seconds/nanoseconds, used to skip duplicate events.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Version(u64, u64, i64, i64);
 
@@ -14,6 +15,7 @@ fn read(path: &Path) -> io::Result<String> {
     read_versioned(path).map(|(text, _)| text)
 }
 
+/// Reject symlinks and non-regular files, then bound bytes read even if the file grows.
 pub(super) fn read_versioned(path: &Path) -> io::Result<(String, Version)> {
     let file = OpenOptions::new()
         .read(true)
@@ -57,6 +59,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// Owned directory for valid publications and deliberately hostile file replacements.
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {

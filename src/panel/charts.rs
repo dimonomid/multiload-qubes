@@ -1,4 +1,5 @@
 //! Chart names, saved keys and default order. Rendering uses ChartKind too.
+/// Chart identity for arrays and rendering; user display order is stored separately.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChartKind {
     Cpu,
@@ -10,11 +11,17 @@ pub(crate) enum ChartKind {
     Disk,
 }
 
+/// Names and persisted keys kept together so callers do not invent their own chart order.
 pub(crate) struct ChartMetadata {
+    /// Typed identity and array index.
     pub kind: ChartKind,
+    /// Label shown in Preferences and tooltips.
     pub name: &'static str,
+    /// Stable key for visibility and order in panel settings.
     pub key: &'static str,
+    /// Initial visibility when no saved setting exists.
     pub default_enabled: bool,
+    /// Named section in saved theme files.
     pub theme_group: &'static str,
     // Older settings numbered palette groups in renderer order.
     pub palette_id: usize,

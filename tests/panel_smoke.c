@@ -80,6 +80,7 @@ static gboolean dismiss_save_error(gpointer data) {
     g_list_free(windows);
     return G_SOURCE_CONTINUE;
 }
+/* Block the actual settings path, then dismiss the error from the nested GTK loop. */
 static void failed_apply(GtkWidget *dialog, const char *path, const char *backup) {
     g_assert_cmpint(g_rename(path, backup), ==, 0);
     /* A directory at the settings filename reliably rejects atomic replacement. */

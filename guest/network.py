@@ -1,3 +1,4 @@
+# Run in the network qube. Send counters; the parser calculates rates in dom0.
 import pathlib, sys, time
 boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
 # Closing the collector connection ends stdin and stops this script. Removing
@@ -21,4 +22,5 @@ while True:
             rows.append(f'{idx}:{rx}:{tx}')
         except (OSError, ValueError):
             continue
+    # Guest monotonic time avoids turning delivery delays into false rate changes.
     print('N1', time.monotonic_ns(), boot, ','.join(rows) or '-', flush=True)

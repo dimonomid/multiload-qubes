@@ -16,32 +16,53 @@ use std::{
     rc::{Rc, Weak},
 };
 
+/// One editor: color changes preview immediately, while panel settings commit on Apply.
 pub(super) struct Preferences {
+    /// Weak link so keeping a dialog alive cannot keep a removed panel item alive.
     owner: Weak<Panel>,
     pub dialog: gtk::Dialog,
     pub(super) notebook: gtk::Notebook,
+    /// Requested width per chart; zero selects automatic sizing.
     pub(super) width: gtk::SpinButton,
+    /// Disabled charts; moving a row here does not destroy its identity.
     pub(super) available: gtk::ListBox,
+    /// Enabled charts in display order.
     pub(super) chart_list: gtk::ListBox,
     pub(super) enable_chart: gtk::Button,
     pub(super) disable_chart: gtk::Button,
+    /// Stable rows indexed by ChartKind, reused for transfers and reordering.
     chart_rows: [gtk::ListBoxRow; ChartKind::COUNT],
     pub(super) move_up: gtk::Button,
     pub(super) move_down: gtk::Button,
+    /// Built-ins, named themes, and the draft, keyed by Selection IDs.
     pub(super) theme: gtk::ComboBoxText,
+    /// Chart whose palette is currently being edited.
     pub(super) chart: gtk::ComboBoxText,
+    /// Packed palette fields exposed as RGBA color buttons.
     pub(super) colors: [gtk::ColorButton; 7],
+    /// Series labels that change with the selected chart's meaning.
     labels: [gtk::Label; 7],
+    /// Width in pixels for the selected chart's border.
     pub(super) border: gtk::SpinButton,
+    /// Shortcut that changes alpha on both background endpoints.
     pub(super) transparent: gtk::CheckButton,
+    /// Selected chart drawn over a checkerboard so alpha is visible.
     preview: gtk::DrawingArea,
+    /// Restore the default theme through the same discard checks as theme selection.
     reset: gtk::Button,
+    /// Fixed sample history for the embedded preview.
     demo: RefCell<Graphs>,
+    /// Editable appearance and baseline, separate from the panel's committed config.
     pub(super) editor: RefCell<Appearance>,
+    /// Named files loaded for this editor; saves take effect immediately.
     pub(super) store: RefCell<ThemeStore>,
+    /// Suppress edit handlers while code refreshes widget values.
     updating: Cell<bool>,
+    /// Apply succeeded; destruction must not restore the old panel colors.
     accepted: Cell<bool>,
+    /// Modal callbacks may outlive the dialog after the panel item is removed.
     pub(super) closed: Cell<bool>,
+    /// Errors encountered while loading named theme files.
     status: gtk::Label,
     pub(super) save_as: gtk::Button,
     pub(super) save_changes: gtk::Button,
@@ -61,6 +82,7 @@ fn label(text: &str) -> gtk::Label {
         .halign(gtk::Align::Start)
         .build()
 }
+/// Unpack RRGGBBAA into GTK's floating-point color channels.
 fn rgba(value: u32) -> gtk::gdk::RGBA {
     gtk::gdk::RGBA::new(
         (value >> 24) as f64 / 255.,
@@ -69,12 +91,14 @@ fn rgba(value: u32) -> gtk::gdk::RGBA {
         (value & 255) as f64 / 255.,
     )
 }
+/// Round GTK channels back to the packed RRGGBBAA storage format.
 fn packed(c: gtk::gdk::RGBA) -> u32 {
     [c.red(), c.green(), c.blue(), c.alpha()]
         .into_iter()
         .fold(0, |out, v| (out << 8) | (v * 255.).round() as u32)
 }
 impl Preferences {
+    /// Copy committed settings into an editor and load shared named theme files.
     pub fn new(owner: &Rc<Panel>) -> Rc<Self> {
         let config = owner.config.borrow().clone();
         let (store, errors) = ThemeStore::load();
@@ -185,6 +209,7 @@ impl Preferences {
         prefs.rebuild_themes();
         prefs
     }
+    /// Lay out the General and Appearance pages using the retained widget handles.
     fn build(&self) {
         let general = grid();
         general.attach(&label("Chart width (0 = square)"), 0, 0, 1, 1);
@@ -254,6 +279,7 @@ impl Preferences {
             .append_page(&appearance, Some(&gtk::Label::new(Some("Appearance"))));
         self.dialog.content_area().add(&self.notebook);
     }
+    /// Use weak owners in signal callbacks so widgets do not keep their editor alive.
     fn connect(self: &Rc<Self>) {
         for list in [&self.available, &self.chart_list] {
             let weak = Rc::downgrade(self);
@@ -418,6 +444,7 @@ impl Preferences {
     fn chart_kind(&self) -> ChartKind {
         ChartKind::ALL[self.chart.active().unwrap_or(0) as usize]
     }
+    /// Copy editor values into widgets and both previews without creating new edits.
     pub(super) fn refresh(&self) {
         if self.closed.get() {
             return;
@@ -468,6 +495,7 @@ impl Preferences {
         self.preview.queue_draw();
         self.updating.set(false);
     }
+    /// Repopulate choices after a named file changes, suppressing selection callbacks.
     fn rebuild_themes(&self) {
         self.updating.set(true);
         self.theme.remove_all();
@@ -513,6 +541,7 @@ impl Preferences {
         self.chart_list.select_row(Some(&row));
         self.update_move_buttons();
     }
+    /// Move the same row between lists, keeping at least one chart enabled.
     fn transfer_chart(&self, enable: bool) {
         let (source, destination) = if enable {
             (&self.available, &self.chart_list)
@@ -538,6 +567,7 @@ impl Preferences {
         source.select_row(next.as_ref());
         self.update_move_buttons();
     }
+    /// Save the proposed settings first; only then replace the panel's committed config.
     fn apply(&self) -> Result<(), String> {
         let owner = self
             .owner
@@ -576,6 +606,7 @@ impl Preferences {
         owner.area.trigger_tooltip_query();
         Ok(())
     }
+    /// Run a modal question; removal of the parent while it runs counts as cancellation.
     fn confirm(&self, text: &str, cancel: &str, accept: &str) -> bool {
         let dialog = gtk::MessageDialog::new(
             Some(&self.dialog),
@@ -611,6 +642,7 @@ impl Preferences {
             dialog.destroy();
         }
     }
+    /// Warn before discarding actual draft edits; selecting draft preserves the current colors.
     pub(super) fn select(&self, id: &str) {
         if id == (Selection::Draft { source: None }).id() {
             self.editor.borrow_mut().edit();
@@ -638,6 +670,7 @@ impl Preferences {
         }
         self.refresh();
     }
+    /// Get a valid nonreserved display name, optionally offering existing names.
     fn name_prompt(&self, title: &str, initial: &str, choices: bool) -> Option<String> {
         let dialog = gtk::Dialog::with_buttons(
             Some(title),
@@ -696,6 +729,7 @@ impl Preferences {
             .source()
             .and_then(|id| self.store.borrow().find(id).cloned())
     }
+    /// Persist a named theme and mark its colors saved only after the write succeeds.
     fn write(&self, id: Option<&str>, name: &str) -> bool {
         let palettes = self.editor.borrow().palettes;
         let result = self.store.borrow_mut().write(id, name, palettes);
@@ -712,6 +746,7 @@ impl Preferences {
             }
         }
     }
+    /// Allow an existing name only after the user confirms overwriting its file.
     fn save_as_theme(&self) {
         let source = self.source();
         let Some(name) = self.name_prompt(
@@ -735,6 +770,7 @@ impl Preferences {
             }
         }
     }
+    /// Keep the UUID and colors while changing a saved theme's display name.
     fn rename_theme(&self) {
         if !matches!(self.editor.borrow().selection, Selection::Saved(_)) {
             return;
@@ -754,6 +790,7 @@ impl Preferences {
         }
         self.write(Some(&source.id), &name);
     }
+    /// Delete the named file but retain its colors as an unlinked draft.
     fn delete_theme(&self) {
         if !matches!(self.editor.borrow().selection, Selection::Saved(_)) {
             return;

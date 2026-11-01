@@ -6,6 +6,7 @@ use clap::Parser;
 use gtk::prelude::*;
 use std::{path::PathBuf, process::ExitCode};
 
+// Standalone preview options; this program does not connect to XFCE or the services.
 #[derive(Parser)]
 #[command(
     name = "multiload-qubes-preview",
@@ -13,18 +14,22 @@ use std::{path::PathBuf, process::ExitCode};
     about = "Simulated Multiload for Qubes charts and Preferences"
 )]
 struct Args {
+    // Render directly to a PNG instead of opening a GTK window.
     #[arg(long, value_name = "PNG", conflicts_with = "preferences")]
     render: Option<PathBuf>,
+    // Image dimensions in pixels; each chart receives an equal share of the width.
     #[arg(long, requires = "render", value_parser = clap::value_parser!(i32).range(28..=16384))]
     render_width: Option<i32>,
     #[arg(long, requires = "render", value_parser = clap::value_parser!(i32).range(4..=4096))]
     render_height: Option<i32>,
+    // Built-in numeric theme ID for reproducible rendered previews.
     #[arg(value_name = "THEME", requires = "render")]
     theme: Option<u32>,
     #[arg(long)]
     preferences: bool,
 }
 
+/// Render simulated charts or open a demo window; neither mode reads live host metrics.
 pub fn run() -> ExitCode {
     let args = Args::parse();
     if let Some(path) = args.render {

@@ -26,11 +26,15 @@ const DRAFT_THEME_ID: i32 = 1000;
 /// Save changes to overwrite the original; it does not mean the draft is saved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
+    /// Hardcoded preset; edits become a draft instead of changing the preset.
     Builtin(BuiltinTheme),
+    /// Named theme UUID; its colors are also stored in the panel settings.
     Saved(String),
+    /// Editable colors, optionally linked to a named theme for Save changes.
     Draft { source: Option<String> },
 }
 impl Selection {
+    /// Combo-box key; saved files use UUIDs rather than built-in numeric IDs.
     pub fn id(&self) -> String {
         match self {
             Self::Saved(id) => format!("saved:{id}"),
@@ -44,6 +48,7 @@ impl Selection {
             Self::Draft { .. } => DRAFT_THEME_ID,
         }
     }
+    /// Saved theme that Save changes should overwrite, if there is one.
     pub fn source(&self) -> Option<&str> {
         match self {
             Self::Saved(id) => Some(id),
@@ -52,9 +57,12 @@ impl Selection {
         }
     }
 }
+/// Colors being used, their theme selection, and the starting point for draft edits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Appearance {
+    /// Built-in, saved file, or editable draft; colors are also kept locally.
     pub selection: Selection,
+    /// Current colors and borders for every chart, including disabled charts.
     pub palettes: Palettes,
     // Keep the starting colors so undoing an edit also clears the discard warning.
     baseline: Palettes,
@@ -80,15 +88,18 @@ impl Appearance {
             baseline: palettes,
         }
     }
+    /// Keep these colors as the new baseline after the theme file was saved.
     pub fn mark_saved(&mut self, id: String) {
         self.selection = Selection::Saved(id);
         self.baseline = self.palettes;
     }
+    /// Enter draft mode without changing colors or losing the saved source.
     pub fn edit(&mut self) {
         self.selection = Selection::Draft {
             source: self.selection.source().map(str::to_owned),
         };
     }
+    /// Keep local colors as a draft if their saved theme was changed or deleted.
     pub fn validate_selection(&mut self, themes: &ThemeStore) {
         // A saved file may have changed or gone away. Keep the panel's colors
         // as a draft instead of replacing them with the current file contents.
@@ -98,15 +109,21 @@ impl Appearance {
             }
         }
     }
+    /// Selecting draft alone is not a change; compare its colors with the baseline.
     pub fn unsaved(&self) -> bool {
         matches!(self.selection, Selection::Draft { .. }) && self.palettes != self.baseline
     }
 }
+/// Settings for one panel instance, kept separate from shared named theme files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Chart width in pixels; zero uses the panel size for square charts.
     pub width: i32,
+    /// Visibility by ChartKind index, independent of display order.
     pub enabled: [bool; ChartKind::COUNT],
+    /// Every chart exactly once, including disabled charts.
     pub order: [ChartKind; ChartKind::COUNT],
+    /// Local theme choice, colors, and draft baseline.
     pub appearance: Appearance,
 }
 impl Default for Config {
@@ -120,6 +137,7 @@ impl Default for Config {
     }
 }
 impl Config {
+    /// Return enabled charts in the user's display order.
     pub fn visible_kinds(&self) -> Vec<ChartKind> {
         self.order
             .iter()
@@ -128,6 +146,7 @@ impl Config {
             .collect()
     }
 
+    /// Repair duplicate order entries, invalid widths, and an empty chart selection.
     pub fn normalize(&mut self) {
         let mut order = Vec::with_capacity(ChartKind::COUNT);
         // Drop repeats, then append any missing charts.
@@ -150,6 +169,7 @@ impl Config {
         file.load_from_file(path, glib::KeyFileFlags::NONE)?;
         Ok(Self::decode(&file))
     }
+    /// Use defaults for absent or invalid settings, preserving valid saved choices.
     pub fn decode(file: &KeyFile) -> Self {
         let mut config = Self {
             width: file.integer("Graphs", "width").unwrap_or(0),
@@ -230,6 +250,7 @@ impl Config {
     }
 }
 
+/// Overlay valid saved colors on defaults; panel settings tolerate missing fields.
 fn read_palettes(file: &KeyFile, prefix: &str, mut palettes: Palettes) -> Palettes {
     for kind in ChartKind::ALL {
         let palette = &mut palettes[kind.index()];

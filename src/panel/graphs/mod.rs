@@ -15,11 +15,17 @@ use std::collections::VecDeque;
 
 use crate::Snapshot;
 
+/// Recent samples shared by all charts; storage follows chart width, not uptime.
 pub struct Graphs {
+    /// Oldest first; None creates a visible gap instead of measured zero.
     history: VecDeque<Option<Snapshot>>,
+    /// Maximum retained samples, set from the chart's horizontal pixel width.
     history_width: usize,
+    /// Current sample text; traffic scale is added using the visible chart width.
     tooltips: [String; ChartKind::COUNT],
+    /// Demo sequence counter; live samples do not depend on it.
     tick: u64,
+    /// Colors by ChartKind index, including live preferences previews.
     pub(crate) palette: [Palette; ChartKind::COUNT],
 }
 
@@ -38,6 +44,7 @@ impl Graphs {
             }),
         }
     }
+    /// Discard samples that can no longer be drawn and release excess deque capacity.
     pub(crate) fn set_history_width(&mut self, width: i32) {
         let width = width.max(1) as usize;
         if width == self.history_width {
@@ -52,6 +59,7 @@ impl Graphs {
             self.history.shrink_to_fit();
         }
     }
+    /// Generate a demo sample or read the current file for standalone preview use.
     pub(crate) fn update(&mut self, demo: bool) {
         self.tick += 1;
         let sample = if demo {
@@ -86,12 +94,14 @@ impl Graphs {
         };
         self.push_sample(sample, demo);
     }
+    /// Read a bounded regular file and reject malformed or stale measurements.
     pub(crate) fn read_snapshot(path: &std::path::Path) -> Option<(Snapshot, InputVersion)> {
         let (text, version) = input::read_versioned(path).ok()?;
         Snapshot::decode_fresh(&text)
             .ok()
             .map(|snapshot| (snapshot, version))
     }
+    /// Append one column, trimming before allocation so history stays bounded.
     pub(crate) fn push_sample(&mut self, sample: Option<Snapshot>, demo: bool) {
         self.tooltips = tooltips(sample.as_ref(), demo);
         while self.history.len() >= self.history_width {
@@ -101,6 +111,7 @@ impl Graphs {
     }
 }
 
+/// Build per-chart text from this sample; missing values remain explicitly unavailable.
 fn tooltips(sample: Option<&Snapshot>, demo: bool) -> [String; ChartKind::COUNT] {
     let text = if let Some(s) = sample {
         let cpu = s
@@ -188,6 +199,7 @@ fn rect(
 }
 
 impl Graphs {
+    /// Use a power-of-two scale covering combined visible rates, with a minimum for low traffic.
     fn io_scale(&self, columns: usize, kind: ChartKind) -> f64 {
         // Keep small background transfers from filling the network chart.
         let minimum = if kind == ChartKind::Network {
@@ -214,6 +226,7 @@ impl Graphs {
             .fold(minimum, f64::max);
         2f64.powf(peak.log2().ceil())
     }
+    /// Draw one chart inside its border with pixel-aligned, clipped plot coordinates.
     fn chart(
         &self,
         cr: &cairo::Context,
@@ -336,6 +349,7 @@ impl Graphs {
 }
 
 impl Graphs {
+    /// Include the traffic scale calculated from the same visible columns as the renderer.
     pub(crate) fn tooltip(
         &self,
         kind: ChartKind,
@@ -358,6 +372,7 @@ impl Graphs {
             Cow::Borrowed(text)
         }
     }
+    /// Divide the surface evenly in the requested display order, then clip each chart.
     pub(crate) fn draw(
         &self,
         cr: &cairo::Context,

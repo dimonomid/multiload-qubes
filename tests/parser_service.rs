@@ -15,9 +15,13 @@ fn identity(domain_id: u32, uuid: &str) -> QubeIdentity {
     }
 }
 
+/// Real parser process with an isolated directory standing in for collector output.
 struct Fixture {
+    /// Host input, raw replies and final metrics live in this test directory.
     path: PathBuf,
+    /// Parser process killed and reaped on drop if the test exits early.
     child: Option<Child>,
+    /// Next host publication advances this value to distinguish test ticks.
     sequence: Cell<u64>,
 }
 impl Fixture {
@@ -37,6 +41,7 @@ impl Fixture {
             sequence: Cell::new(0),
         }
     }
+    /// Use rename like production so inotify tests exercise file replacement.
     fn write(&self, name: &str, bytes: &[u8]) {
         let path = self.path.join(name);
         let tmp = path.with_extension("tmp");
@@ -46,6 +51,7 @@ impl Fixture {
     fn begin(&self, expected: &[&str], wait: f64, memory: bool) -> f64 {
         self.begin_at(now(), expected, wait, memory, 0.5)
     }
+    /// Publish a host tick with independently chosen sample time, deadline and interval.
     fn begin_at(
         &self,
         timestamp: f64,
@@ -128,6 +134,7 @@ impl Fixture {
         }
     }
     #[track_caller]
+    /// Match output by its host timestamp rather than accepting a previous tick's file.
     fn wait(&self, stamp: f64) -> Snapshot {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {

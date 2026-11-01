@@ -10,11 +10,14 @@ use std::sync::{
 
 /// Own signal registrations for one collector run; workers start after registration.
 pub struct Shutdown {
+    /// Set by signal handlers and read by the main loop.
     requested: Arc<AtomicBool>,
+    /// Registrations removed on drop, including after a partial registration failure.
     handlers: Vec<SigId>,
 }
 
 impl Shutdown {
+    /// Register both shutdown signals before starting workers.
     pub fn register() -> io::Result<Self> {
         let mut shutdown = Self {
             requested: Arc::new(AtomicBool::new(false)),

@@ -21,6 +21,7 @@ extern "C" {
 
 const LIBRARY_DIRS: [&str; 4] = ["/usr/lib64", "/usr/lib", "/lib64", "/lib"];
 
+/// Find versioned system libraries without requiring a particular Xen package version.
 fn candidates(directories: &[&Path]) -> Vec<PathBuf> {
     let mut paths = std::collections::BTreeSet::new();
     for directory in directories {
@@ -60,26 +61,47 @@ type Quantity = unsafe extern "C" fn(*mut c_void) -> c_ulonglong;
 type ByIndex = unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void;
 type Name = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
 
+/// Resolved libxenstat functions kept alive by the library stored with them.
 struct Api {
+    /// Open a xenstat handle.
     init: Init,
+    /// Release a xenstat handle.
     uninit: Release,
+    /// Allocate a node sample with the requested collection flags.
     get_node: GetNode,
+    /// Release a node and all domain/vCPU data it contains.
     free_node: Release,
+    /// Node physical RAM in bytes.
     total: Quantity,
+    /// Node unallocated RAM in bytes.
     free: Quantity,
+    /// Number of host logical CPUs.
     cpus: Count,
+    /// Number of domains in a node sample.
     count: Count,
+    /// Borrow a domain from the node by list index, not domain ID.
     domain: ByIndex,
+    /// Read a domain's current Xen ID.
     id: Count,
+    /// Borrow a domain name until its node is released.
     name: Name,
+    /// Cumulative scheduled CPU nanoseconds for a domain.
     cpu: Quantity,
+    /// Number of vCPU slots to inspect, including offline slots.
     vcpus: Count,
+    /// Borrow one vCPU slot from a domain.
     vcpu: ByIndex,
+    /// Whether a vCPU slot is online.
     vcpu_online: Count,
+    /// Current domain RAM allocation in bytes.
     memory: Quantity,
+    /// Whether Xen has paused the domain.
     paused: Count,
+    /// Whether the domain is shut down.
     shutdown: Count,
+    /// Whether the domain is being destroyed.
     dying: Count,
+    /// Own the loaded code until all handles and borrowed samples are released.
     _library: Library,
 }
 impl Api {
@@ -116,6 +138,7 @@ impl Api {
         ))
     }
 
+    /// Count online slots; the caller must pass a live domain from this API's node.
     unsafe fn online_vcpus(&self, domain: *mut c_void) -> Option<u32> {
         let slots = (self.vcpus)(domain);
         if slots > 65536 {
@@ -168,10 +191,15 @@ impl Api {
     }
 }
 
+/// Owned Xen handles; native pointers and calls stay inside this module.
 pub struct Xen {
+    /// Resolved functions and their loaded library.
     api: Api,
+    /// Live xenstat handle, released on drop.
     handle: NonNull<c_void>,
+    /// Live XenStore handle, used for VM identities and stub-domain IDs.
     xs: NonNull<c_void>,
+    /// Previous detailed-sampling status, used to log only changes.
     vcpu_unavailable: bool,
 }
 impl Drop for Xen {
@@ -182,8 +210,11 @@ impl Drop for Xen {
         }
     }
 }
+/// One owned native sample; the borrow keeps its release function loaded.
 struct Node<'a> {
+    /// Native sample whose domain and vCPU pointers are borrowed only within sample().
     ptr: NonNull<c_void>,
+    /// Library owner used to release the sample on drop.
     api: &'a Api,
 }
 impl Drop for Node<'_> {
@@ -195,6 +226,7 @@ impl Drop for Node<'_> {
 }
 
 impl Xen {
+    /// Open both privileged handles, releasing the first if opening the second fails.
     pub fn open() -> Result<Self, String> {
         let api = Api::open()?;
         let handle =
@@ -212,6 +244,7 @@ impl Xen {
             vcpu_unavailable: false,
         })
     }
+    /// Copy a bounded UTF-8 XenStore value and release its native allocation.
     fn read(&self, path: &str) -> Option<String> {
         let path = CString::new(path).ok()?;
         let mut len = 0;
@@ -234,6 +267,7 @@ impl Xen {
         }
         text
     }
+    /// Copy Xen data into owned Rust values before releasing the native node.
     pub fn sample(&mut self) -> Result<Host, String> {
         // XENSTAT_VCPU (1) collects online state for every vCPU slot. If that
         // scan fails, retain the original base metrics and leave Qube CPU unknown.
@@ -324,6 +358,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Build test libraries in an owned directory, with markers showing when they unload.
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {

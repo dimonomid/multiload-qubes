@@ -7,20 +7,29 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Match the same physical device across samples, including replacement at the same name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Identity {
+    /// Kernel device name shown in tooltips.
     name: String,
+    /// Resolved sysfs path, so aliases do not hide a device change.
     path: PathBuf,
+    /// Kernel major:minor pair.
     device: String,
+    /// Kernel disk sequence when available; changes when a device is replaced.
     sequence: Option<u64>,
 }
+/// Cumulative 512-byte sectors from the kernel block statistics.
 #[derive(Clone, Copy)]
 struct Counters {
+    /// Sectors read since the device counters started.
     read: u64,
+    /// Sectors written since the device counters started.
     written: u64,
 }
 type Frame = BTreeMap<Identity, Counters>;
 
+/// Treat missing optional sysfs attributes differently from read failures.
 fn optional(path: &Path) -> io::Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(value) => Ok(Some(value)),
@@ -31,6 +40,7 @@ fn optional(path: &Path) -> io::Result<Option<String>> {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
+/// Pick read and written sector totals from Linux block stat fields.
 fn counters(text: &str) -> io::Result<Counters> {
     let fields: Vec<_> = text.split_whitespace().collect();
     if fields.len() < 11 {
@@ -47,6 +57,7 @@ fn counters(text: &str) -> io::Result<Counters> {
     })
 }
 
+/// Select physical disks once, excluding partitions and stacked virtual devices.
 fn scan(root: &Path) -> io::Result<Frame> {
     let virtual_root = root
         .parent()
@@ -115,11 +126,14 @@ fn scan(root: &Path) -> io::Result<Frame> {
     Ok(frame)
 }
 
+/// Disk rate baseline; device-set changes or counter resets produce a gap.
 #[derive(Default)]
 struct Tracker {
+    /// Previous monotonic sample time and per-device sector counters.
     previous: Option<(Duration, Frame)>,
 }
 impl Tracker {
+    /// Use real elapsed time and require matching device identities for a rate.
     fn update(&mut self, frame: Frame, now: Duration) -> DiskSnapshot {
         let devices = frame.keys().map(|id| id.name.clone()).collect();
         let previous = self.previous.replace((now, frame.clone()));
@@ -144,12 +158,16 @@ impl Tracker {
     }
 }
 
+/// Physical disk sampling with rate tracking and repeated-error suppression.
 #[derive(Default)]
 pub struct Collector {
+    /// Counter baseline, cleared when sampling fails.
     tracker: Tracker,
+    /// Last logged failure; successful sampling clears it.
     last_error: Option<String>,
 }
 impl Collector {
+    /// Read physical device counters; failures reset the baseline before recovery.
     pub fn sample(&mut self, now: Duration) -> Option<DiskSnapshot> {
         match scan(Path::new("/sys/block")) {
             Ok(frame) => {
@@ -176,6 +194,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    /// Temporary sysfs tree for disk selection, replacement and counter tests.
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {

@@ -23,11 +23,15 @@ use stream::{CommandSpec, Reader, Timing};
 /// Host usage uses the host CPU count; per-qube usage uses that qube's vCPUs.
 #[derive(Default)]
 pub struct CpuTracker {
+    /// Per-identity CPU counter, online vCPU count, and previous reporting eligibility.
     previous: BTreeMap<QubeIdentity, (u64, Option<u32>, bool)>,
+    /// Latest per-qube deltas; kept alongside the returned whole-host percentage.
     per_domain: Option<DomainCpuSnapshot>,
+    /// Previous monotonic sample time, relative to collector startup.
     time: Option<Duration>,
 }
 impl CpuTracker {
+    /// Advance baselines and calculate usage over the actual elapsed time.
     pub fn update(&mut self, host: &Host, now: Duration) -> Option<f64> {
         let mut delta = 0.0;
         let mut current = BTreeMap::new();
@@ -110,10 +114,15 @@ const MAX_NUM_REPORTER_WORKERS: usize = MAX_NUM_QUBE_REPORTERS + NUM_NETWORK_REP
 
 /// Owns only transports; measurement fields are parsed by the other service.
 struct Reporters {
+    /// Active connections and the qube identities they were opened for.
     readers: BTreeMap<ReporterKey, (Qube, Reader)>,
+    /// Stopped workers still finishing process cleanup; they count toward the limit.
     retired: Vec<Reader>,
+    /// Root-owned raw report directory; filenames come from ReporterKey.
     directory: std::path::PathBuf,
+    /// Build the fixed command; tests replace it with a local reporter.
     factory: fn(&Qube, ReporterKey) -> CommandSpec,
+    /// Maximum active and retiring workers combined.
     limit: usize,
 }
 impl Reporters {
@@ -126,6 +135,7 @@ impl Reporters {
             limit: MAX_NUM_REPORTER_WORKERS,
         }
     }
+    /// Match workers to current qubes and options, then retire obsolete connections.
     fn sync(&mut self, host: &Host, memory: bool, network: Option<&str>) {
         let mut wanted = BTreeMap::new();
         let mut memory_count = 0;
@@ -193,6 +203,7 @@ impl Reporters {
             }
         }
     }
+    /// Reserve idle workers and return only those accepted for this tick.
     fn request(&self, tick_id: &str) -> BTreeMap<ReporterKey, QubeIdentity> {
         let mut expected = BTreeMap::new();
         for (key, (qube, reader)) in &self.readers {
@@ -214,13 +225,20 @@ impl Drop for Reporters {
     }
 }
 
+/// Collection settings after command-line validation.
 pub struct Options {
+    /// Print one host-only snapshot without starting guest workers.
     pub once: bool,
+    /// Target time between tick starts, in seconds.
     pub interval: f64,
+    /// Host-only diagnostic snapshot; host.json and raw/ live beside it.
     pub output: std::path::PathBuf,
+    /// Qube name for network reporting, or None when disabled.
     pub network: Option<String>,
+    /// Enable general qube reports independently of network reporting.
     pub memory: bool,
 }
+/// Sample Xen, request guests, then collect dom0 data while replies arrive.
 pub fn run(options: Options) -> Result<(), String> {
     let mut xen = xen::Xen::open()?;
     let mut cpu = CpuTracker::default();
