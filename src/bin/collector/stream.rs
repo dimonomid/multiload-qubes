@@ -17,6 +17,8 @@ use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+#[cfg(test)]
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -155,38 +157,6 @@ fn set_nonblocking(fd: &impl AsFd) -> Result<(), Errno> {
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum ConnectionState {
-    Waiting,
-    Retrying { reason: String, retry_at: Instant },
-}
-
-struct Connection {
-    state: ConnectionState,
-    // Keep errors across reconnects to suppress repeated failures.
-    // Clear them only after a requested frame has been saved.
-    last_error: Option<String>,
-}
-impl Connection {
-    fn new() -> Self {
-        Self {
-            state: ConnectionState::Waiting,
-            last_error: None,
-        }
-    }
-
-    fn recovered(&mut self) -> bool {
-        self.last_error.take().is_some()
-    }
-
-    fn retry(&mut self, reason: String, retry_at: Instant) -> bool {
-        let changed = self.last_error.as_ref() != Some(&reason);
-        self.last_error = Some(reason.clone());
-        self.state = ConnectionState::Retrying { reason, retry_at };
-        changed
-    }
-}
-
 // The collector reserves an idle worker before listing it in a tick manifest.
 // No lock is held during process I/O, and a busy worker never queues another tick.
 #[derive(Default)]
@@ -230,14 +200,20 @@ impl Requests {
     }
 }
 
-type SharedConnection = Arc<Mutex<Connection>>;
+// Observe diagnostics in tests without sharing the worker's error state.
+#[cfg(test)]
+#[derive(Debug)]
+enum LogEvent {
+    Unavailable(String),
+    Recovered,
+}
 /// Owns a reporting worker. Dropping it requests a stop and waits for the worker.
 /// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
     requested: Arc<Requests>,
     stop: Arc<AtomicBool>,
     #[cfg(test)]
-    connection: SharedConnection,
+    log_rx: Receiver<LogEvent>,
     thread: Option<JoinHandle<()>>,
 }
 impl Reader {
@@ -245,23 +221,24 @@ impl Reader {
         let stop = Arc::new(AtomicBool::new(false));
         let requested = Arc::new(Requests::default());
         let worker_requested = requested.clone();
-        let connection = Arc::new(Mutex::new(Connection::new()));
-        let (worker_stop, worker_connection) = (stop.clone(), connection.clone());
+        let worker_stop = stop.clone();
+        #[cfg(test)]
+        let (log_tx, log_rx) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("guest-metrics".into())
             .spawn(move || {
+                // Keep errors across reconnects; only a saved reply clears one.
+                let mut last_error = None;
                 while !worker_stop.load(Ordering::Relaxed) {
-                    worker_connection
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .state = ConnectionState::Waiting;
                     let result = session(
                         &spec,
                         timing,
                         &worker_stop,
-                        &worker_connection,
+                        &mut last_error,
                         &target,
                         &worker_requested,
+                        #[cfg(test)]
+                        &log_tx,
                     );
                     if let Some(tick_id) = worker_requested.disconnect() {
                         // A failed request is a terminal, unavailable reply.
@@ -272,32 +249,27 @@ impl Reader {
                     }
                     let reason = result.err().unwrap_or_else(|| "guest stream closed".into());
                     let deadline = Instant::now() + timing.retry;
-                    let notify = worker_connection
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .retry(reason.clone(), deadline);
-                    if notify {
+                    if last_error.as_ref() != Some(&reason) {
                         eprintln!(
                             "Guest metrics [{}] unavailable: {}; retrying in {:.1}s",
                             spec.source,
                             reason,
                             timing.retry.as_secs_f64()
                         );
+                        #[cfg(test)]
+                        let _ = log_tx.send(LogEvent::Unavailable(reason.clone()));
                     }
+                    last_error = Some(reason);
                     while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                         thread::sleep(POLL_INTERVAL);
                     }
                 }
-                worker_connection
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .state = ConnectionState::Waiting;
             })?;
         Ok(Self {
             requested,
             stop,
             #[cfg(test)]
-            connection,
+            log_rx,
             thread: Some(thread),
         })
     }
@@ -325,9 +297,10 @@ fn session(
     spec: &CommandSpec,
     timing: Timing,
     stop: &AtomicBool,
-    connection: &SharedConnection,
+    last_error: &mut Option<String>,
     target: &RawTarget,
     requested: &Requests,
+    #[cfg(test)] log_tx: &Sender<LogEvent>,
 ) -> Result<(), String> {
     let mut command = Command::new(&spec.program);
     command
@@ -402,12 +375,10 @@ fn session(
                         requested.ready();
                         buffer.drain(..=end);
                         // Only the restricted parser decides if metrics are valid.
-                        let recovered = connection
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .recovered();
-                        if recovered {
+                        if last_error.take().is_some() {
                             eprintln!("Guest metrics [{}] recovered", spec.source);
+                            #[cfg(test)]
+                            let _ = log_tx.send(LogEvent::Recovered);
                         }
                     }
                 }
@@ -441,7 +412,7 @@ mod tests {
             },
         );
         request_when_ready(&reader, "failure-tick");
-        let (reason, _) = await_retry(&reader);
+        let reason = await_failure(&reader);
         let frame = attempts.frame("failure-tick");
         assert!(frame.payload.is_empty());
         drop(reader);
@@ -469,7 +440,7 @@ mod tests {
         let attempts = Attempts::new();
         let reader = attempts.start("import sys\nsys.stdin.readline()\nsys.stderr.write('script failed\\n'); sys.stderr.flush()\nprint('first\\nextra',flush=True)\nraise SystemExit(9)", Timing { retry: Duration::from_secs(30), ..timing() });
         request_when_ready(&reader, "test-tick");
-        let (error, _) = await_retry(&reader);
+        let error = await_failure(&reader);
         assert!(error.contains("unsolicited guest report"), "{error}");
         assert!(error.contains("exit status 9"), "{error}");
         assert!(error.contains("stderr: script failed"), "{error}");
@@ -513,29 +484,6 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
     }
 
-    #[test]
-    fn connection_suppresses_repeat_errors_until_a_frame_recovers() {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut connection = Connection::new();
-        assert_eq!(connection.state, ConnectionState::Waiting);
-        assert!(!connection.recovered());
-        assert!(connection.retry("reporter timed out".into(), deadline));
-        assert_eq!(
-            connection.state,
-            ConnectionState::Retrying {
-                reason: "reporter timed out".into(),
-                retry_at: deadline
-            }
-        );
-        // Opening a new connection alone does not mean it can deliver replies.
-        connection.state = ConnectionState::Waiting;
-        assert!(!connection.retry("reporter timed out".into(), deadline));
-        assert!(connection.retry("guest stream closed".into(), deadline));
-        assert!(connection.recovered());
-        assert_eq!(connection.last_error, None);
-        assert!(!connection.recovered());
-        assert!(connection.retry("guest stream closed".into(), deadline));
-    }
     fn spawn_process(script: &str) -> Process {
         Process(
             Command::new("python3")
@@ -732,19 +680,16 @@ mod tests {
         }
     }
 
-    fn await_retry(reader: &Reader) -> (String, Instant) {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if let ConnectionState::Retrying { reason, retry_at } =
-                &reader.connection.lock().unwrap().state
-            {
-                return (reason.clone(), *retry_at);
-            }
-            assert!(
-                Instant::now() < deadline,
-                "reader did not enter retry state"
-            );
-            thread::sleep(Duration::from_millis(5));
+    fn next_log(reader: &Reader) -> LogEvent {
+        reader
+            .log_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker did not report a diagnostic")
+    }
+    fn await_failure(reader: &Reader) -> String {
+        match next_log(reader) {
+            LogEvent::Unavailable(reason) => reason,
+            other => panic!("expected a failure diagnostic, got {other:?}"),
         }
     }
 
@@ -788,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_eof_records_retry_reason_and_deadline() {
+    fn unexpected_eof_reports_failure_and_waits_before_retry() {
         let attempts = Attempts::new();
         let reader = attempts.start(
             "pass",
@@ -797,10 +742,11 @@ mod tests {
                 ..timing()
             },
         );
-        let (reason, retry_at) = await_retry(&reader);
+        let reason = await_failure(&reader);
         assert!(reason.starts_with("guest stream closed"), "{reason}");
         assert!(reason.contains("exit status 0"), "{reason}");
-        assert!(retry_at > Instant::now());
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(attempts.pids().len(), 1);
         assert!(!reader.request("unavailable-tick"));
         assert!(!attempts.target().path.exists());
         drop(reader);
@@ -826,7 +772,7 @@ mod tests {
                 ..timing()
             },
         );
-        let (reason, _) = await_retry(&reader);
+        let reason = await_failure(&reader);
         assert!(reason.contains("unsolicited guest report"), "{reason}");
         assert!(!attempts.target().path.exists());
         drop(reader);
@@ -848,7 +794,7 @@ mod tests {
             request_when_ready(&reader, &tick_id);
             let frame = attempts.frame(&tick_id);
             if frame.payload.is_empty() {
-                let (reason, _) = await_retry(&reader);
+                let reason = await_failure(&reader);
                 assert!(reason.contains("sample rate limit"), "{reason}");
                 drop(reader);
                 attempts.assert_reaped();
@@ -901,9 +847,9 @@ mod tests {
         // Idle between collector ticks is not a timed-out request.
         thread::sleep(Duration::from_millis(300));
         assert!(!requests.exists());
-        assert!(!matches!(
-            reader.connection.lock().unwrap().state,
-            ConnectionState::Retrying { .. }
+        assert!(matches!(
+            reader.log_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
         ));
         request_when_ready(&reader, "test-tick");
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -958,10 +904,8 @@ mod tests {
         )
         .unwrap();
         request_when_ready(&reader, "test-tick");
-        await_retry(&reader);
-        assert!(
-            matches!(&reader.connection.lock().unwrap().state, ConnectionState::Retrying { reason, .. } if reason.starts_with("reporter timed out"))
-        );
+        let reason = await_failure(&reader);
+        assert!(reason.starts_with("reporter timed out"), "{reason}");
         let frame: RawFrame =
             serde_json::from_slice(&std::fs::read(attempts.0.join("raw")).unwrap()).unwrap();
         assert_eq!(frame.tick_id, "test-tick");
@@ -993,13 +937,13 @@ mod tests {
     fn repeated_failed_reconnects_are_reaped_and_eventually_recover() {
         let attempts = Attempts::new();
         let reader = attempts.start(
-            &format!("if len(p.read_text().splitlines()) <= 3: raise SystemExit(7)\n{REPORTER}"),
+            "if len(p.read_text().splitlines()) <= 3: raise SystemExit(7)\nimport sys\nsys.stdin.readline()\nprint('opaque reply',flush=True)\nsys.stdin.readline()\nraise SystemExit(7)",
             Timing {
                 stale: Duration::from_secs(30),
                 retry: Duration::from_millis(200),
             },
         );
-        await_retry(&reader);
+        let first_error = await_failure(&reader);
         assert!(!reader.request("failed-tick"));
         attempts.assert_reaped();
         // A failed attempt must wait for its retry deadline, not spin spawning.
@@ -1016,15 +960,30 @@ mod tests {
         request_when_ready(&reader, "recovered-tick");
         assert_eq!(attempts.frame("recovered-tick").payload, b"opaque reply");
         assert_eq!(attempts.pids().len(), 4);
-        // The raw file is renamed just before recovery is recorded.
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while reader.connection.lock().unwrap().last_error.is_some() {
-            assert!(Instant::now() < deadline, "recovery was not recorded");
-            thread::sleep(Duration::from_millis(5));
-        }
+        // Repeated identical failures produced no extra notices before recovery.
+        assert!(matches!(next_log(&reader), LogEvent::Recovered));
+        request_when_ready(&reader, "failed-again");
+        assert_eq!(await_failure(&reader), first_error);
+        assert!(attempts.frame("failed-again").payload.is_empty());
         let start = Instant::now();
         drop(reader);
         assert!(start.elapsed() < Duration::from_secs(1));
+        attempts.assert_reaped();
+    }
+
+    #[test]
+    fn changed_failures_are_logged_without_a_successful_reply() {
+        let attempts = Attempts::new();
+        let reader = attempts.start(
+            "raise SystemExit(7 if len(p.read_text().splitlines()) == 1 else 9)",
+            Timing {
+                retry: Duration::from_millis(200),
+                ..timing()
+            },
+        );
+        assert!(await_failure(&reader).contains("exit status 7"));
+        assert!(await_failure(&reader).contains("exit status 9"));
+        drop(reader);
         attempts.assert_reaped();
     }
 
@@ -1043,7 +1002,7 @@ mod tests {
             attempts.target(),
         )
         .unwrap();
-        await_retry(&reader);
+        await_failure(&reader);
         assert!(!reader.request("failed-tick"));
         assert!(attempts.pids().is_empty());
         std::os::unix::fs::symlink("/usr/bin/python3", &program).unwrap();
@@ -1062,7 +1021,7 @@ mod tests {
             attempts.target(),
         )
         .unwrap();
-        await_retry(&reader);
+        await_failure(&reader);
         let start = Instant::now();
         drop(reader);
         assert!(start.elapsed() < Duration::from_secs(1));
@@ -1124,7 +1083,7 @@ mod tests {
                 ..timing()
             },
         );
-        await_retry(&reader);
+        await_failure(&reader);
         attempts.assert_reaped();
         let start = Instant::now();
         drop(reader);
