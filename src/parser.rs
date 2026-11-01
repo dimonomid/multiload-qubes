@@ -30,6 +30,7 @@ impl Parser {
         file: &str,
         identity: &str,
         kind: Kind,
+        max_age: f64,
     ) -> Option<Reading> {
         let frame: RawFrame = handoff::read_bounded(&directory.join(file), handoff::MAX_RAW_BYTES)
             .ok()
@@ -38,7 +39,7 @@ impl Parser {
         // age after reading it, rather than against the start of the scan.
         let now = unix_time_now().ok()?;
         if frame.identity != identity
-            || !handoff::fresh(frame.timestamp, now)
+            || !handoff::fresh(frame.timestamp, now, max_age)
             || frame.payload.len() > handoff::MAX_REPORT_BYTES
         {
             self.reports.remove(file);
@@ -93,6 +94,7 @@ impl Parser {
         .map_err(|e| e.to_string())?;
         let base = Snapshot::decode_fresh_at(&frame.metrics, now).map_err(|e| e.to_string())?;
         let raw = input.join("raw");
+        let max_age = (base.period * 4.0).max(handoff::STALE_SECONDS);
         let mut memory = BTreeMap::new();
         let mut wanted = std::collections::BTreeSet::new();
         let active = eligible(&frame.host);
@@ -107,6 +109,7 @@ impl Parser {
                 &file,
                 &format!("{id}/{}", key.uuid),
                 Kind::Memory(*id),
+                max_age,
             ) {
                 memory.insert(*id, reading);
             }
@@ -116,7 +119,7 @@ impl Parser {
         let network = frame
             .network_identity
             .as_deref()
-            .and_then(|identity| self.read(&raw, "network", identity, Kind::Network));
+            .and_then(|identity| self.read(&raw, "network", identity, Kind::Network, max_age));
         wanted.insert("network".into());
         self.reports.retain(|file, _| wanted.contains(file));
         let usage = memory

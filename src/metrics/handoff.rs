@@ -41,6 +41,6 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-pub fn fresh(timestamp: f64, now: f64) -> bool {
-    timestamp.is_finite() && now >= timestamp && now - timestamp <= STALE_SECONDS
+pub fn fresh(timestamp: f64, now: f64, max_age: f64) -> bool {
+    timestamp.is_finite() && now >= timestamp && now - timestamp <= max_age
 }

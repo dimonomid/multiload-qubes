@@ -176,7 +176,9 @@ impl Tracker {
             return Ok(None);
         }
         let elapsed = (stamp - before) as f64 / 1e9;
-        if !(0.1..=5.0).contains(&elapsed) {
+        // The collector supports intervals up to 10 seconds. Allow delivery
+        // gaps too, while rejecting unreasonable counter windows.
+        if !(0.1..=60.0).contains(&elapsed) {
             return Ok(None);
         }
         let (mut rx, mut tx) = (0.0, 0.0);
@@ -306,12 +308,22 @@ mod tests {
         assert_eq!(t.update(network(5, "-").as_bytes()), Ok(None));
     }
     #[test]
+    fn network_supports_slow_collector_intervals() {
+        let mut tracker = Tracker::new(Kind::Network);
+        assert_eq!(tracker.update(network(1, "2:100:200").as_bytes()), Ok(None));
+        assert_eq!(
+            tracker.update(network(11, "2:1100:2200").as_bytes()),
+            Ok(Some(Reading::Network(100.0, 200.0)))
+        );
+    }
+
+    #[test]
     fn resets_rebaseline() {
         for next in [
             network(2, "2:1:1"),
             network(2, "3:200:200"),
             network(1, "2:100:200"),
-            network(20, "2:100:200"),
+            network(100, "2:100:200"),
             network(2, "2:200:200").replace("12345678", "aaaaaaaa"),
         ] {
             let mut t = Tracker::new(Kind::Network);

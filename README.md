@@ -189,8 +189,8 @@ sudo systemctl edit multiload-qubes-collector.service
 
 This creates an override under
 `/etc/systemd/system/multiload-qubes-collector.service.d/override.conf`.
-For example, to collect network traffic from `sys-net-2` and host statistics
-every second, put:
+For example, to collect network traffic from `sys-net-2` and sample host and
+guest statistics every second, put:
 
 ```ini
 [Service]
@@ -210,8 +210,8 @@ Collector settings:
 - `--no-network`: disable guest network collection.
 - `--no-guest-memory`: disable guest RAM and swap collection. Their RAM
   allocation is still counted, but actual usage is unknown.
-- `--interval SECONDS`: host collection interval, from `0.25` to `10`;
-  default `0.5`. Guest scripts still report every `0.5` seconds.
+- `--interval SECONDS`: host and guest collection interval, from `0.25` to `10`;
+  default `0.5`.
 
 To remove all local overrides for the collector service and restore defaults:
 

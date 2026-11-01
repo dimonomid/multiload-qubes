@@ -10,7 +10,7 @@ use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -97,7 +97,7 @@ impl Default for Timing {
 }
 
 // Dropping on any error/stop terminates the entire local qvm-run process group.
-// Guest scripts then exit on their next write to the closed stdout connection.
+// Guest scripts exit when their stdin closes (or a write sees a broken pipe).
 struct Process(Child);
 impl Process {
     fn signal_group(&self, signal: Signal) {
@@ -197,6 +197,7 @@ type SharedConnection = Arc<Mutex<Connection>>;
 /// Owns a reporting worker. Dropping it requests a stop and waits for the worker.
 /// Call `stop()` on all readers first when shutting down several at once.
 pub struct Reader {
+    requested: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     #[cfg(test)]
     connection: SharedConnection,
@@ -224,6 +225,8 @@ impl Reader {
         target: Option<RawTarget>,
     ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let requested = Arc::new(AtomicBool::new(false));
+        let worker_requested = requested.clone();
         let connection = Arc::new(Mutex::new(Connection::new()));
         let (worker_stop, worker_connection) = (stop.clone(), connection.clone());
         let thread = thread::Builder::new()
@@ -241,6 +244,7 @@ impl Reader {
                         &worker_stop,
                         &worker_connection,
                         target.as_ref(),
+                        &worker_requested,
                     );
                     if let Some(target) = &target {
                         // An empty frame clears the parser's previous value on
@@ -282,6 +286,7 @@ impl Reader {
                     .state = ConnectionState::Waiting;
             })?;
         Ok(Self {
+            requested,
             stop,
             #[cfg(test)]
             connection,
@@ -301,6 +306,10 @@ impl Reader {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .value(Instant::now(), self.timing.stale)
+    }
+    /// Coalesce ticks without blocking the host sampling loop.
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -326,7 +335,15 @@ fn session(
     stop: &AtomicBool,
     connection: &SharedConnection,
 ) -> Result<(), String> {
-    session_inner(spec, kind, timing, stop, connection, None)
+    session_inner(
+        spec,
+        kind,
+        timing,
+        stop,
+        connection,
+        None,
+        &AtomicBool::new(false),
+    )
 }
 
 fn session_inner(
@@ -336,11 +353,12 @@ fn session_inner(
     stop: &AtomicBool,
     connection: &SharedConnection,
     target: Option<&RawTarget>,
+    requested: &AtomicBool,
 ) -> Result<(), String> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
@@ -354,6 +372,8 @@ fn session_inner(
             .map_err(|e| e.to_string())?
             .as_nanos()
     );
+    let mut stdin = proc.0.stdin.take().ok_or("missing stdin")?;
+    set_nonblocking(&stdin).map_err(|e| e.to_string())?;
     let mut stdout = proc.0.stdout.take().ok_or("missing stdout")?;
     set_nonblocking(&stdout).map_err(|e| e.to_string())?;
     let mut stderr = proc.0.stderr.take().ok_or("missing stderr")?;
@@ -364,6 +384,7 @@ fn session_inner(
         let mut buffer = Vec::new();
         let mut chunk = [0; 4096];
         let mut last = Instant::now();
+        let mut pending: Option<Instant> = None;
         let mut budget_time = last;
         // Allow a short burst of buffered lines, but reject a stream that keeps
         // sending more than four samples per second. Guest output is untrusted.
@@ -372,7 +393,30 @@ fn session_inner(
             captured
                 .drain(&mut stderr)
                 .map_err(|e| format!("cannot read guest stderr: {e}"))?;
-            if last.elapsed() > timing.stale {
+            if target.is_some() {
+                let tick = requested.swap(false, Ordering::Relaxed);
+                // Ignore ticks while a reply is outstanding; never queue catch-up
+                // requests for a slow guest.
+                if pending.is_none() && tick {
+                    let request = b"sample\n";
+                    match stdin.write(request) {
+                        Ok(n) if n == request.len() => pending = Some(Instant::now()),
+                        Ok(_) => return Err("incomplete sample request".into()),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) => {}
+                        Err(error) => return Err(format!("cannot request guest sample: {error}")),
+                    }
+                }
+            }
+            let timed_out = if target.is_some() {
+                pending.is_some_and(|sent| sent.elapsed() > timing.stale)
+            } else {
+                last.elapsed() > timing.stale
+            };
+            if timed_out {
                 return Err("reporter timed out".into());
             }
             match stdout.read(&mut chunk) {
@@ -392,6 +436,9 @@ fn session_inner(
                             return Err("guest exceeded sample rate limit".into());
                         }
                         let reading = if let Some(target) = target {
+                            if pending.take().is_none() {
+                                return Err("unsolicited guest report".into());
+                            }
                             target.publish(&session, &buffer[..end])?;
                             None
                         } else {
@@ -837,6 +884,95 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn requests_are_tick_driven_and_do_not_queue_behind_a_slow_reply() {
+        let attempts = Attempts::new();
+        let requests = attempts.0.join("requests");
+        let gate = attempts.0.join("reply");
+        let target = attempts.0.join("raw");
+        let body = format!("import sys\nrequests=pathlib.Path({requests:?})\ngate=pathlib.Path({gate:?})\nfor command in sys.stdin:\n with requests.open('a') as f: f.write(command)\n while not gate.exists(): time.sleep(.005)\n print('M1 23 1000 400',flush=True)");
+        let reader = Reader::spawn_raw(
+            spec(&attempts.script(&body)),
+            Kind::Memory(23),
+            Timing {
+                stale: Duration::from_millis(250),
+                retry: Duration::from_secs(5),
+            },
+            RawTarget {
+                path: target.clone(),
+                identity: "23/test".into(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while attempts.pids().is_empty() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Idle between collector ticks is not a timed-out request.
+        thread::sleep(Duration::from_millis(300));
+        assert!(!requests.exists());
+        assert!(!matches!(
+            reader.connection.lock().unwrap().state,
+            ConnectionState::Retrying { .. }
+        ));
+        reader.request();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !requests.exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        for _ in 0..10 {
+            reader.request();
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(Duration::from_millis(40));
+        assert_eq!(std::fs::read_to_string(&requests).unwrap(), "sample\n");
+        std::fs::write(gate, b"reply now").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !target.exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let frame: RawFrame = serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(frame.payload, b"M1 23 1000 400");
+        thread::sleep(Duration::from_millis(40));
+        assert_eq!(std::fs::read_to_string(&requests).unwrap(), "sample\n");
+        reader.request();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while std::fs::read_to_string(&requests).unwrap().lines().count() < 2 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(reader);
+        attempts.assert_reaped();
+    }
+
+    #[test]
+    fn unanswered_requests_time_out_and_are_reaped() {
+        let attempts = Attempts::new();
+        let reader = Reader::spawn_raw(
+            spec(&attempts.script("import sys\nsys.stdin.readline()\ntime.sleep(30)")),
+            Kind::Memory(23),
+            Timing {
+                stale: Duration::from_millis(100),
+                retry: Duration::from_secs(5),
+            },
+            RawTarget {
+                path: attempts.0.join("raw"),
+                identity: "23/test".into(),
+            },
+        )
+        .unwrap();
+        reader.request();
+        await_retry(&reader);
+        assert!(
+            matches!(&reader.connection.lock().unwrap().state, ConnectionState::Retrying { reason, .. } if reason.starts_with("reporter timed out"))
+        );
+        drop(reader);
+        attempts.assert_reaped();
     }
 
     #[test]

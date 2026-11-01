@@ -1,8 +1,11 @@
-import pathlib, time
+import pathlib, sys, time
 boot = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-# When the collector closes the connection, the next print raises BrokenPipeError
-# and exits this script. Closing the panel plugin alone does not stop the collector.
+# Closing the collector connection ends stdin and stops this script. Removing
+# the panel plugin alone does not stop the collector or its connections.
 while True:
+    command = sys.stdin.readline(16)
+    if command != 'sample\n':
+        break
     rows = []
     # Count physical NICs only. Adding virtual links would count the same
     # traffic again as it passes between qubes or through a bridge.
@@ -19,4 +22,3 @@ while True:
         except (OSError, ValueError):
             continue
     print('N1', time.monotonic_ns(), boot, ','.join(rows) or '-', flush=True)
-    time.sleep(0.5)

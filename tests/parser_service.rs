@@ -30,8 +30,12 @@ impl Fixture {
         fs::rename(tmp, path).unwrap();
     }
     fn host(&self, timestamp: f64, memory: bool) {
+        self.host_period(timestamp, memory, 0.5);
+    }
+    fn host_period(&self, timestamp: f64, memory: bool, period: f64) {
         let domain = |id| json!({"id":id,"identity":format!("uuid-{id}"),"name":format!("qube-{id}"),"cpu_ns":0,"vcpus":2,"allocated":1000,"paused":false,"shutdown":false,"stubdom":null});
-        let metrics = format!("MQ2 {timestamp:.6} 25 4000 2000 100 1000 0 0.5 unknown unknown\n");
+        let metrics =
+            format!("MQ2 {timestamp:.6} 25 4000 2000 100 1000 0 {period} unknown unknown\n");
         let frame = json!({"host":{"total":4000,"free":2000,"cpus":4,"domains":[domain(0),domain(1)]},"metrics":metrics,"memory_enabled":memory,"network_identity":"1/uuid-1","dom0_ram":[1000,100],"dom0_swap":[100,50]});
         self.write("host.json", &serde_json::to_vec(&frame).unwrap());
     }
@@ -236,5 +240,30 @@ fn network_reconnects_reset_the_baseline_and_malformed_files_do_not_crash_parser
     f.wait(|s| s.unknown == 1000);
     f.raw("memory-1", "1/uuid-1", "a", now(), b"M2 1 1000 400 500 125");
     f.wait(|s| s.used == 700);
+    f.stop();
+}
+
+#[test]
+fn slow_collector_intervals_keep_guest_reports_fresh_between_ticks() {
+    let mut f = Fixture::new();
+    f.host_period(now(), true, 10.0);
+    f.raw(
+        "memory-1",
+        "1/uuid-1",
+        "a",
+        now() - 6.0,
+        b"M2 1 1000 400 500 125",
+    );
+    f.start();
+    f.wait(|s| s.used == 700);
+    // Reports older than the interval's freshness window remain unavailable.
+    f.raw(
+        "memory-1",
+        "1/uuid-1",
+        "a",
+        now() - 41.0,
+        b"M2 1 1000 400 500 125",
+    );
+    f.wait(|s| s.unknown == 1000);
     f.stop();
 }

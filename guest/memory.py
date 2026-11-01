@@ -1,8 +1,11 @@
-import pathlib, subprocess, time
+import pathlib, subprocess, sys
 domid = subprocess.check_output(['xenstore-read', 'domid'], text=True).strip()
-# When the collector closes the connection, the next print raises BrokenPipeError
-# and exits this script. Closing the panel plugin alone does not stop the collector.
+# Closing the collector connection ends stdin and stops this script. Removing
+# the panel plugin alone does not stop the collector or its connections.
 while True:
+    command = sys.stdin.readline(16)
+    if command != 'sample\n':
+        break
     fields = {}
     for line in pathlib.Path('/proc/meminfo').read_text().splitlines():
         key, _, value = line.partition(':')
@@ -12,4 +15,3 @@ while True:
     # after a stop/restart. dom0 supplies the qube name; we do not send one.
     print('M2', domid, fields['MemTotal'], fields['MemAvailable'],
           fields['SwapTotal'], fields['SwapFree'], flush=True)
-    time.sleep(0.5)

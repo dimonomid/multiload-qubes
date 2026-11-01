@@ -193,6 +193,9 @@ impl Reporters {
                 Err(error) => eprintln!("Cannot start guest reporter: {error}"),
             }
         }
+        for (_, reader) in self.readers.values() {
+            reader.request();
+        }
     }
 }
 impl Drop for Reporters {
@@ -476,7 +479,7 @@ mod tests {
         let mut pool = Reporters::new(directory.clone());
         pool.limit = 1;
         pool.factory = |_, _| {
-            CommandSpec { source: "raw transport test".into(), program: "python3".into(), args: vec!["-u".into(),"-c".into(),"import sys,time; sys.stdout.buffer.write(b'not a metric: \\xff\\n'); sys.stdout.flush(); time.sleep(20)".into()] }
+            CommandSpec { source: "raw transport test".into(), program: "python3".into(), args: vec!["-u".into(),"-c".into(),"import sys,time; sys.stdin.readline(); sys.stdout.buffer.write(b'not a metric: \\xff\\n'); sys.stdout.flush(); time.sleep(20)".into()] }
         };
         let mut h = host();
         pool.sync(&h, true, None);
