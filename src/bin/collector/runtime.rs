@@ -5,11 +5,10 @@
 use super::{disk, stream, xen};
 
 use crate::metrics::{
-    eligible, handoff, protocol, publish, shutdown, Host, HostSample, Identity,
+    eligible, handoff, protocol, publish, shutdown, Host, HostSample, Identity, ReporterKey,
     MAX_NUM_QUBE_REPORTERS, NUM_NETWORK_REPORTERS,
 };
 use multiload_qubes_snapshot::{DomainCpuSnapshot, DomainUsage, DomainUsageSnapshot};
-use protocol::Kind;
 #[cfg(test)]
 use protocol::Reading;
 use std::collections::BTreeMap;
@@ -111,10 +110,10 @@ const MAX_NUM_REPORTER_WORKERS: usize = MAX_NUM_QUBE_REPORTERS + NUM_NETWORK_REP
 
 /// Owns only transports; measurement fields are parsed by the other service.
 struct Reporters {
-    readers: BTreeMap<String, (Identity, Reader)>,
+    readers: BTreeMap<ReporterKey, (Identity, Reader)>,
     retired: Vec<Reader>,
     directory: std::path::PathBuf,
-    factory: fn(&Identity, Kind) -> CommandSpec,
+    factory: fn(&Identity, ReporterKey) -> CommandSpec,
     limit: usize,
 }
 impl Reporters {
@@ -123,7 +122,7 @@ impl Reporters {
             readers: BTreeMap::new(),
             retired: Vec::new(),
             directory,
-            factory: |identity, kind| CommandSpec::qube(&identity.name, kind),
+            factory: |identity, key| CommandSpec::qube(&identity.name, key),
             limit: MAX_NUM_REPORTER_WORKERS,
         }
     }
@@ -133,23 +132,22 @@ impl Reporters {
         for identity in eligible(host).into_values() {
             if memory && memory_count < MAX_NUM_QUBE_REPORTERS {
                 memory_count += 1;
-                wanted.insert(
-                    format!("memory-{}", identity.id),
-                    (identity.clone(), Kind::Memory(identity.id)),
-                );
+                wanted.insert(ReporterKey::QubeMetrics(identity.id), identity.clone());
             }
             if network == Some(identity.name.as_str()) {
-                wanted.insert("network".into(), (identity, Kind::Network));
+                wanted.insert(ReporterKey::Network, identity);
             }
         }
+        // The same reporter key may now belong to a different qube. Compare
+        // identities too before reusing an existing connection.
         let remove: Vec<_> = self
             .readers
             .iter()
-            .filter(|(file, (key, _))| wanted.get(*file).is_none_or(|(new, _)| new != key))
-            .map(|(file, _)| file.clone())
+            .filter(|(key, (identity, _))| wanted.get(*key).is_none_or(|new| new != identity))
+            .map(|(key, _)| *key)
             .collect();
-        for file in remove {
-            if let Some((_, reader)) = self.readers.remove(&file) {
+        for key in remove {
+            if let Some((_, reader)) = self.readers.remove(&key) {
                 reader.stop();
                 self.retired.push(reader);
             }
@@ -158,19 +156,22 @@ impl Reporters {
         // Remove abandoned files so domain-ID churn cannot grow /run forever.
         if let Ok(files) = fs::read_dir(&self.directory) {
             for file in files.flatten() {
-                let name = file.file_name().to_string_lossy().into_owned();
-                let report_file = name == "network"
-                    || name
-                        .strip_prefix("memory-")
-                        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
-                // A worker may be publishing a temporary file right now.
-                if report_file && !wanted.contains_key(&name) {
+                let name = file.file_name();
+                // Only known reporter names belong to this cleanup. Temporary
+                // files may still be in use by a worker.
+                let Some(key) = name
+                    .to_str()
+                    .and_then(|name| name.parse::<ReporterKey>().ok())
+                else {
+                    continue;
+                };
+                if !wanted.contains_key(&key) {
                     let _ = fs::remove_file(file.path());
                 }
             }
         }
-        for (file, (identity, kind)) in wanted {
-            if self.readers.contains_key(&file) {
+        for (key, identity) in wanted {
+            if self.readers.contains_key(&key) {
                 continue;
             }
             // Count workers still shutting down so rapid restarts stay bounded.
@@ -178,22 +179,22 @@ impl Reporters {
                 break;
             }
             let target = stream::RawTarget {
-                path: self.directory.join(&file),
+                path: self.directory.join(key.to_string()),
                 identity: format!("{}/{}", identity.id, identity.uuid),
             };
-            match Reader::spawn((self.factory)(&identity, kind), Timing::default(), target) {
+            match Reader::spawn((self.factory)(&identity, key), Timing::default(), target) {
                 Ok(reader) => {
-                    self.readers.insert(file, (identity, reader));
+                    self.readers.insert(key, (identity, reader));
                 }
                 Err(error) => eprintln!("Cannot start guest reporter: {error}"),
             }
         }
     }
-    fn request(&self, tick_id: &str) -> BTreeMap<String, String> {
+    fn request(&self, tick_id: &str) -> BTreeMap<ReporterKey, String> {
         let mut expected = BTreeMap::new();
-        for (file, (identity, reader)) in &self.readers {
+        for (key, (identity, reader)) in &self.readers {
             if reader.request(tick_id) {
-                expected.insert(file.clone(), format!("{}/{}", identity.id, identity.uuid));
+                expected.insert(*key, format!("{}/{}", identity.id, identity.uuid));
             }
         }
         expected
@@ -555,7 +556,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         while pool
             .readers
-            .get("memory-1")
+            .get(&ReporterKey::QubeMetrics(1))
             .is_none_or(|(key, _)| key.uuid != "replacement")
         {
             assert!(Instant::now() < deadline);
@@ -568,7 +569,7 @@ mod tests {
         pool.request("test-tick");
         assert!(pool.readers.len() + pool.retired.len() <= 1);
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !pool.readers.contains_key("memory-2") {
+        while !pool.readers.contains_key(&ReporterKey::QubeMetrics(2)) {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
             pool.sync(&h, true, None);

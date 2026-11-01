@@ -1,8 +1,8 @@
 //! Parses guest reports without Xen access. A collector tick is published once,
 //! when its accepted requests finish or its 100 ms deadline expires.
 use crate::metrics::handoff::{self, HostFrame, RawFrame};
-use crate::metrics::protocol::{Kind, Reading, Tracker};
-use crate::metrics::{eligible, publish, shutdown};
+use crate::metrics::protocol::{Reading, Tracker};
+use crate::metrics::{eligible, publish, shutdown, ReporterKey};
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use nix::errno::Errno;
 use nix::poll::{poll, PollFd, PollFlags};
@@ -21,13 +21,13 @@ struct Report {
 }
 #[derive(Default)]
 struct Parser {
-    reports: BTreeMap<String, Report>,
+    reports: BTreeMap<ReporterKey, Report>,
 }
 
 struct PendingTick {
     frame: HostFrame,
     // None is a terminal reply with no valid measurement (including network warmup).
-    replies: BTreeMap<String, Option<Reading>>,
+    replies: BTreeMap<ReporterKey, Option<Reading>>,
 }
 impl PendingTick {
     fn load(input: &Path, now: f64) -> Result<Self, String> {
@@ -55,24 +55,24 @@ impl PendingTick {
             .keys()
             .filter_map(|id| {
                 self.replies
-                    .get(&format!("memory-{id}"))
+                    .get(&ReporterKey::QubeMetrics(*id))
                     .copied()
                     .flatten()
                     .map(|r| (*id, r))
             })
             .collect();
-        let network = self.replies.get("network").copied().flatten();
+        let network = self.replies.get(&ReporterKey::Network).copied().flatten();
         self.frame.sample.snapshot(&memory, network)
     }
 }
 
 impl Parser {
-    fn parse(&mut self, file: &str, frame: RawFrame, kind: Kind) -> Option<Reading> {
-        let report = self.reports.entry(file.into()).or_insert_with(|| Report {
+    fn parse(&mut self, key: ReporterKey, frame: RawFrame) -> Option<Reading> {
+        let report = self.reports.entry(key).or_insert_with(|| Report {
             identity: frame.identity.clone(),
             session: frame.session.clone(),
             timestamp: 0.0,
-            tracker: Tracker::new(kind),
+            tracker: Tracker::new(key),
             reading: None,
             last_error: None,
         });
@@ -81,7 +81,7 @@ impl Parser {
                 identity: frame.identity,
                 session: frame.session,
                 timestamp: 0.0,
-                tracker: Tracker::new(kind),
+                tracker: Tracker::new(key),
                 reading: None,
                 last_error: None,
             };
@@ -91,16 +91,16 @@ impl Parser {
             report.reading = match report.tracker.update(&frame.payload) {
                 Ok(reading) => {
                     if reading.is_some() && report.last_error.take().is_some() {
-                        eprintln!("Guest metrics [{file}] recovered");
+                        eprintln!("Guest metrics [{key}] recovered");
                     }
                     reading
                 }
                 Err(error) => {
                     if report.last_error.as_ref() != Some(&error) {
-                        eprintln!("Guest metrics [{file}] invalid: {error}");
+                        eprintln!("Guest metrics [{key}] invalid: {error}");
                         report.last_error = Some(error);
                     }
-                    report.tracker = Tracker::new(kind);
+                    report.tracker = Tracker::new(key);
                     None
                 }
             };
@@ -108,18 +108,21 @@ impl Parser {
         report.reading
     }
 
-    fn ingest(&mut self, input: &Path, pending: &mut PendingTick, file: &str) {
-        let Some(identity) = pending.frame.tick.expected.get(file) else {
+    fn ingest(&mut self, input: &Path, pending: &mut PendingTick, key: ReporterKey) {
+        // A recognized reporter may still be busy with an older tick. Only
+        // connections accepted for this tick belong in its result.
+        let Some(identity) = pending.frame.tick.expected.get(&key) else {
             return;
         };
-        if pending.replies.contains_key(file) {
+        if pending.replies.contains_key(&key) {
             return;
         }
-        let Some(frame) =
-            handoff::read_bounded(&input.join("raw").join(file), handoff::MAX_RAW_BYTES)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<RawFrame>(&b).ok())
-        else {
+        let Some(frame) = handoff::read_bounded(
+            &input.join("raw").join(key.to_string()),
+            handoff::MAX_RAW_BYTES,
+        )
+        .ok()
+        .and_then(|b| serde_json::from_slice::<RawFrame>(&b).ok()) else {
             return;
         };
         let Ok(now) = unix_time_now() else {
@@ -137,47 +140,29 @@ impl Parser {
         {
             return;
         }
-        let kind = if file == "network" {
-            Kind::Network
-        } else {
-            let Some(id) = file.strip_prefix("memory-").and_then(|s| s.parse().ok()) else {
-                return;
-            };
-            Kind::Memory(id)
-        };
         let reading = if frame.session == "disconnected" && frame.payload.is_empty() {
-            self.reports.remove(file);
+            self.reports.remove(&key);
             None
         } else {
-            self.parse(file, frame, kind)
+            self.parse(key, frame)
         };
-        pending.replies.insert(file.into(), reading);
+        pending.replies.insert(key, reading);
     }
     fn rescan(&mut self, input: &Path, pending: &mut PendingTick) {
-        let files: Vec<_> = pending.frame.tick.expected.keys().cloned().collect();
-        for file in files {
-            self.ingest(input, pending, &file);
+        let keys: Vec<_> = pending.frame.tick.expected.keys().copied().collect();
+        for key in keys {
+            self.ingest(input, pending, key);
         }
     }
     fn prune(&mut self, frame: &HostFrame) {
         let active = eligible(&frame.sample.host);
-        self.reports.retain(|file, report| {
-            if file == "network" {
-                frame.network_identity.as_ref() == Some(&report.identity)
-            } else {
-                if !frame.memory_enabled {
-                    return false;
-                }
-                let Some(id) = file
-                    .strip_prefix("memory-")
-                    .and_then(|s| s.parse::<u32>().ok())
-                else {
-                    return false;
-                };
-                active.get(&id).is_some_and(|key| {
-                    file == &format!("memory-{id}")
-                        && report.identity == format!("{id}/{}", key.uuid)
-                })
+        self.reports.retain(|key, report| match key {
+            ReporterKey::Network => frame.network_identity.as_ref() == Some(&report.identity),
+            ReporterKey::QubeMetrics(id) => {
+                frame.memory_enabled
+                    && active
+                        .get(id)
+                        .is_some_and(|qube| report.identity == format!("{id}/{}", qube.uuid))
             }
         });
     }
@@ -208,7 +193,7 @@ pub fn run(options: Options) -> Result<(), String> {
     let mut finished_tick_id: Option<String> = None;
     let mut host_changed = true;
     let mut rescan = false;
-    let mut changed: BTreeSet<String> = BTreeSet::new();
+    let mut changed: BTreeSet<ReporterKey> = BTreeSet::new();
     let mut fresh_until = 0.0;
     let mut last_error = None;
     while !shutdown.requested() {
@@ -249,8 +234,8 @@ pub fn run(options: Options) -> Result<(), String> {
             if rescan {
                 parser.rescan(&options.input, tick);
             } else {
-                for file in &changed {
-                    parser.ingest(&options.input, tick, file);
+                for key in &changed {
+                    parser.ingest(&options.input, tick, *key);
                 }
             }
             if tick.complete()
@@ -302,7 +287,11 @@ pub fn run(options: Options) -> Result<(), String> {
                             host_changed = true;
                         }
                         if event.wd == raw_watch {
-                            changed.insert(name);
+                            // Failed writes can delete temporary files too.
+                            // Those events do not name a published report.
+                            if let Ok(key) = name.parse::<ReporterKey>() {
+                                changed.insert(key);
+                            }
                         }
                     }
                 }

@@ -2,6 +2,8 @@
 //! This module has no Xen handles or guest command-launching code.
 pub mod handoff;
 pub mod protocol;
+mod reporter;
+pub use reporter::ReporterKey;
 pub mod shutdown;
 pub use multiload_qubes_snapshot::MAX_NUM_QUBE_REPORTERS;
 // Network collection has its own connection, separate from a qube's RAM/swap reporter.

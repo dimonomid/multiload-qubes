@@ -2,7 +2,7 @@
 //!
 //! Guest output is not trusted. RAM and swap are in KiB; network counters are
 //! in bytes. Network rates use the guest's monotonic clock, not arrival times.
-use super::handoff::MAX_REPORT_BYTES;
+use super::{handoff::MAX_REPORT_BYTES, ReporterKey};
 use std::collections::BTreeMap;
 
 pub fn number(value: &str) -> Result<u64, String> {
@@ -89,22 +89,18 @@ pub enum Reading {
     Network(f64, f64),
 }
 
-#[derive(Clone, Copy)]
-pub enum Kind {
-    Memory(u32),
-    Network,
-}
-
 type NetworkFrame = (u64, String, BTreeMap<u64, (u64, u64)>);
 pub struct Tracker {
-    kind: Kind,
+    // The key chooses the format and expected domain ID. The parser checks
+    // UUID/session changes separately and replaces the tracker when they change.
+    key: ReporterKey,
     previous: Option<NetworkFrame>,
 }
 
 impl Tracker {
-    pub fn new(kind: Kind) -> Self {
+    pub fn new(key: ReporterKey) -> Self {
         Self {
-            kind,
+            key,
             previous: None,
         }
     }
@@ -116,7 +112,7 @@ impl Tracker {
         }
         let text = std::str::from_utf8(line).map_err(|_| "invalid encoding")?;
         let fields: Vec<_> = text.split_whitespace().collect();
-        if let Kind::Memory(domid) = self.kind {
+        if let ReporterKey::QubeMetrics(domid) = self.key {
             if line.len() > 256
                 || !((fields.len() == 4 && fields[0] == "M1")
                     || (fields.len() == 6 && fields[0] == "M2"))
@@ -218,7 +214,7 @@ mod tests {
         );
         assert!(dom0_memory("MemTotal: 1000 kB").is_err());
         assert_eq!(
-            Tracker::new(Kind::Memory(23)).update(b"M1 23 1000 400"),
+            Tracker::new(ReporterKey::QubeMetrics(23)).update(b"M1 23 1000 400"),
             Ok(Some(Reading::Memory {
                 used: 600,
                 total: 1000,
@@ -226,7 +222,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            Tracker::new(Kind::Memory(23)).update(b"M1 23 1000 1000"),
+            Tracker::new(ReporterKey::QubeMetrics(23)).update(b"M1 23 1000 1000"),
             Ok(Some(Reading::Memory {
                 used: 0,
                 total: 1000,
@@ -241,7 +237,7 @@ mod tests {
             ("M2 23 1000 400 0 0", 0, 0),
         ] {
             assert_eq!(
-                Tracker::new(Kind::Memory(23)).update(frame.as_bytes()),
+                Tracker::new(ReporterKey::QubeMetrics(23)).update(frame.as_bytes()),
                 Ok(Some(Reading::Memory {
                     used: 600,
                     total: 1000,
@@ -265,7 +261,7 @@ mod tests {
             "M1 23 1000 400 500 0",
         ] {
             assert!(
-                Tracker::new(Kind::Memory(23))
+                Tracker::new(ReporterKey::QubeMetrics(23))
                     .update(frame.as_bytes())
                     .is_err(),
                 "{frame}"
@@ -284,16 +280,20 @@ mod tests {
             b"\xff",
             b"M1 23 1",
         ] {
-            assert!(Tracker::new(Kind::Memory(23)).update(frame).is_err());
+            assert!(Tracker::new(ReporterKey::QubeMetrics(23))
+                .update(frame)
+                .is_err());
         }
         for n in ["", "-1", "1\n", "９", "99999999999999999999"] {
             assert!(number(n).is_err());
         }
-        assert!(Tracker::new(Kind::Memory(23)).update(&[b'x'; 257]).is_err());
+        assert!(Tracker::new(ReporterKey::QubeMetrics(23))
+            .update(&[b'x'; 257])
+            .is_err());
     }
     #[test]
     fn sums_interfaces_and_distinguishes_idle() {
-        let mut t = Tracker::new(Kind::Network);
+        let mut t = Tracker::new(ReporterKey::Network);
         assert_eq!(
             t.update(network(1, "2:100:200,3:50:60").as_bytes()),
             Ok(None)
@@ -310,7 +310,7 @@ mod tests {
     }
     #[test]
     fn network_supports_slow_collector_intervals() {
-        let mut tracker = Tracker::new(Kind::Network);
+        let mut tracker = Tracker::new(ReporterKey::Network);
         assert_eq!(tracker.update(network(1, "2:100:200").as_bytes()), Ok(None));
         assert_eq!(
             tracker.update(network(11, "2:1100:2200").as_bytes()),
@@ -327,7 +327,7 @@ mod tests {
             network(100, "2:100:200"),
             network(2, "2:200:200").replace("12345678", "aaaaaaaa"),
         ] {
-            let mut t = Tracker::new(Kind::Network);
+            let mut t = Tracker::new(ReporterKey::Network);
             t.update(network(1, "2:100:200").as_bytes()).unwrap();
             assert_eq!(t.update(next.as_bytes()), Ok(None));
         }
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn rejects_network_garbage_and_names() {
         for data in ["2:-1:3", "2:1:2,2:3:4", "0:1:2", "2:1:2:3"] {
-            assert!(Tracker::new(Kind::Network)
+            assert!(Tracker::new(ReporterKey::Network)
                 .update(network(1, data).as_bytes())
                 .is_err());
         }

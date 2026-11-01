@@ -5,8 +5,8 @@
 //! their measurements or making the sampling loop wait for guest I/O.
 use super::diagnostics::StderrCapture;
 use crate::metrics::handoff::{RawFrame, MAX_REPORT_BYTES};
-use crate::metrics::protocol::Kind;
 use crate::metrics::publish_bytes;
+use crate::metrics::ReporterKey;
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{killpg, Signal};
@@ -69,17 +69,17 @@ pub struct CommandSpec {
     pub args: Vec<String>,
 }
 impl CommandSpec {
-    pub fn qube(name: &str, kind: Kind) -> Self {
-        let script = match kind {
-            Kind::Memory(_) => METRICS_SCRIPT,
-            Kind::Network => NETWORK_SCRIPT,
+    pub fn qube(name: &str, key: ReporterKey) -> Self {
+        let script = match key {
+            ReporterKey::QubeMetrics(_) => METRICS_SCRIPT,
+            ReporterKey::Network => NETWORK_SCRIPT,
         };
         Self {
             source: format!(
                 "{name} {}",
-                match kind {
-                    Kind::Memory(_) => "RAM",
-                    Kind::Network => "network",
+                match key {
+                    ReporterKey::QubeMetrics(_) => "RAM",
+                    ReporterKey::Network => "network",
                 }
             ),
             program: "qvm-run".into(),
@@ -1094,14 +1094,14 @@ mod tests {
     #[test]
     fn qubes_command_never_autostarts() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-        let cmd = CommandSpec::qube("dev", Kind::Memory(23));
+        let cmd = CommandSpec::qube("dev", ReporterKey::QubeMetrics(23));
         assert_eq!(cmd.program, "qvm-run");
         assert!(cmd.args.iter().any(|s| s == "--no-autostart"));
         assert!(cmd.args.iter().any(|s| s == "--no-gui"));
         assert!(cmd.args.last().unwrap().contains("xenstore-read"));
         assert_eq!(cmd.source, "dev RAM");
         assert_eq!(
-            CommandSpec::qube("sys-net", Kind::Network).source,
+            CommandSpec::qube("sys-net", ReporterKey::Network).source,
             "sys-net network"
         );
     }
