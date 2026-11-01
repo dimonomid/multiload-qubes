@@ -3,7 +3,7 @@
 
 Name:           multiload-qubes
 # x-release-please-start-version
-Version:        0.1.0
+Version:        0.2.0
 # x-release-please-end
 Release:        1%{?dist}
 Summary:        Whole-machine CPU, RAM, network, swap and disk I/O graphs for the Qubes XFCE panel
