@@ -81,9 +81,9 @@ pub struct Host {
 /// Host measurements from one tick, before qube replies are combined with them.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct HostSample {
-    /// Unix time of this host sample, in seconds; the parser preserves it.
+    /// Seconds since the Unix epoch. Use f64 to match the number stored in host.json.
     pub timestamp: f64,
-    /// Configured collection interval in seconds, not the measured CPU window.
+    /// Use seconds rather than Duration to match host.json. The collector waits using Duration.
     pub period: f64,
     /// Xen totals and current domain state.
     pub host: Host,

@@ -6,7 +6,7 @@ mod xen;
 use multiload_qubes::metrics;
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 /// Collect Qubes CPU, RAM, network, swap and physical-disk activity.
 #[derive(Parser, Debug)]
@@ -17,8 +17,8 @@ struct Cli {
     once: bool,
 
     /// Collection interval in seconds (0.25–10).
-    #[arg(long, default_value_t = 1.0, value_parser = parse_interval)]
-    interval: f64,
+    #[arg(long, default_value = "1", value_parser = parse_interval)]
+    interval: Duration,
 
     /// Path of the host snapshot.
     #[arg(long, default_value = "/run/multiload-qubes-host/metrics")]
@@ -37,12 +37,12 @@ struct Cli {
     no_qube_metrics: bool,
 }
 
-fn parse_interval(value: &str) -> Result<f64, String> {
+fn parse_interval(value: &str) -> Result<Duration, String> {
     let interval: f64 = value.parse().map_err(|_| "expected a number of seconds")?;
     if !interval.is_finite() || !(0.25..=10.0).contains(&interval) {
         return Err("interval must be between 0.25 and 10 seconds".into());
     }
-    Ok(interval)
+    Ok(Duration::from_secs_f64(interval))
 }
 
 fn parse_qube(value: &str) -> Result<String, String> {
@@ -85,7 +85,7 @@ mod tests {
     fn defaults_and_existing_options() {
         let options = parse(&[]).unwrap();
         assert!(!options.once && options.memory);
-        assert_eq!(options.interval, 1.0);
+        assert_eq!(options.interval, Duration::from_secs(1));
         assert_eq!(
             options.output,
             PathBuf::from("/run/multiload-qubes-host/metrics")
@@ -103,10 +103,13 @@ mod tests {
         ])
         .unwrap();
         assert!(options.once && !options.memory);
-        assert_eq!(options.interval, 0.25);
+        assert_eq!(options.interval, Duration::from_millis(250));
         assert_eq!(options.output, PathBuf::from("/tmp/metrics"));
         assert_eq!(options.network.as_deref(), Some("other-net"));
-        assert_eq!(parse(&["--interval=10"]).unwrap().interval, 10.0);
+        assert_eq!(
+            parse(&["--interval=10"]).unwrap().interval,
+            Duration::from_secs(10)
+        );
     }
 
     #[test]

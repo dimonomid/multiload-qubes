@@ -119,6 +119,7 @@ impl Default for Cadence {
 impl Cadence {
     /// Learn arrival spacing without treating downtime or compressed catch-up as the cadence.
     fn received(&mut self, now: Instant, period: f64) {
+        // Seconds match the snapshot file; convert to Duration here because this code sets timers.
         let advertised = Duration::from_secs_f64(period);
         // Use the collector's interval until two arrivals can be compared, and
         // after a restart or interval change. Downtime is not a sampling interval.

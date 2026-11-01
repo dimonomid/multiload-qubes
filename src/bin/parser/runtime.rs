@@ -278,6 +278,7 @@ pub fn run(options: Options) -> Result<(), String> {
         if now > fresh_until {
             let _ = std::fs::remove_file(&options.output);
         }
+        // Use integer milliseconds rather than Duration here because poll takes that unit.
         let timeout_ms = pending.as_ref().map_or(1000, |tick| {
             ((tick.frame.tick.deadline - unix_time_now().unwrap_or(now)).max(0.0) * 1000.0)
                 .ceil()

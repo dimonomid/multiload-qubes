@@ -17,6 +17,7 @@ pub const MAX_DOMAIN_ENTRIES: usize = MAX_NUM_QUBE_REPORTERS + 1;
 
 /// Maximum age in seconds: allow missed ticks, but reject old measurements.
 pub fn max_sample_age(period: f64) -> f64 {
+    // Use seconds rather than Duration because the file timestamps are numbers in seconds.
     (period * 4.0).max(5.0)
 }
 
@@ -151,7 +152,7 @@ pub struct DiskSnapshot {
 /// Measurements for one collection tick; each metric can be unavailable independently.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
-    /// Unix timestamp in seconds; the wire format uses six fractional digits.
+    /// Seconds since the Unix epoch. Use f64 to match the number in the snapshot file.
     pub timestamp: f64,
     /// Whole-machine CPU percentage, or unavailable/warming up.
     pub cpu: Option<f64>,
@@ -165,7 +166,7 @@ pub struct Snapshot {
     pub unknown: u64,
     /// Xen/unattributed overhead in KiB, outside domain allocation.
     pub overhead: u64,
-    /// Collector sampling interval in seconds.
+    /// Collection interval. Use seconds rather than Duration to match the snapshot file.
     pub period: f64,
     /// Incoming and outgoing bytes/second, or unavailable/warming up.
     pub network: Option<(f64, f64)>,

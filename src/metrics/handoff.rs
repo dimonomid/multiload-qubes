@@ -1,10 +1,13 @@
 //! Root-owned files passed to the parser. Guest bytes never choose a path or identity.
+//! Timestamps and deadlines use seconds since the Unix epoch to match the JSON files.
+//! They are shared clock times, not durations to wait.
 use super::{HostSample, QubeIdentity, ReporterKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 /// Bound one guest line before storing or parsing it.
 pub const MAX_REPORT_BYTES: usize = 8192;
@@ -14,7 +17,7 @@ pub const MAX_RAW_BYTES: usize = 64 * 1024;
 pub const MAX_HOST_BYTES: usize = 1024 * 1024;
 
 /// Shared wait for guest replies, starting just before the collector queues requests.
-pub const TICK_WAIT_SECONDS: f64 = 0.1;
+pub const TICK_REPLY_WINDOW: Duration = Duration::from_millis(100);
 
 /// One collector round and the replies the parser should wait for.
 #[derive(Serialize, Deserialize)]

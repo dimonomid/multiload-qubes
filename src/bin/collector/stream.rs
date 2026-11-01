@@ -477,6 +477,7 @@ fn session(
                     }
                     while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                         let now = Instant::now();
+                        // Refill only when a reply arrives; no timer is needed.
                         budget = (budget
                             + now.duration_since(budget_time).as_secs_f64() * REPORTS_PER_SECOND)
                             .min(REPORT_BURST)
