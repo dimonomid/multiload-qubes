@@ -1,6 +1,6 @@
 //! Root-owned files passed to the parser. Guest bytes never choose a path or identity.
-//! Timestamps and deadlines use seconds since the Unix epoch to match the JSON files.
-//! They are shared clock times, not durations to wait.
+//! Reply deadlines and receipt times use CLOCK_MONOTONIC nanoseconds shared by
+//! processes on this host. Unix timestamps are kept separately for age checks.
 use super::{HostSample, QubeIdentity, ReporterKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,8 +24,8 @@ pub const TICK_REPLY_WINDOW: Duration = Duration::from_millis(100);
 pub struct Tick {
     /// Collector-instance and sequence key; never taken from or sent to a guest.
     pub tick_id: String,
-    /// Shared reply cutoff as Unix seconds, compared with collector receipt times.
-    pub deadline: f64,
+    /// CLOCK_MONOTONIC nanoseconds; wall-clock changes must not change the reply window.
+    pub deadline_ns: u64,
     /// Accepted reporters mapped to the qubes seen by the collector. The key alone
     /// cannot distinguish a qube from another qube that later reuses its domain ID.
     pub expected: BTreeMap<ReporterKey, QubeIdentity>,
@@ -53,10 +53,21 @@ pub struct RawFrame {
     pub identity: QubeIdentity,
     /// Connection key; a new session resets network counter history.
     pub session: String,
-    /// Unix seconds when the collector saved the reply, not a guest timestamp.
+    /// CLOCK_MONOTONIC nanoseconds when the collector received the line, for deadline checks.
+    pub received_ns: u64,
+    /// Unix seconds for age checks, not a guest timestamp.
     pub timestamp: f64,
     /// Unparsed guest bytes without the newline; empty for a disconnect notice.
     pub payload: Vec<u8>,
+}
+
+/// Shared clock for elapsed-time deadlines. Unlike Instant, its value can be written
+/// to a file and compared by another process on the same host.
+pub fn monotonic_ns() -> Result<u64, String> {
+    let time =
+        nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_err(|e| e.to_string())?;
+    u64::try_from(Duration::from(time).as_nanos())
+        .map_err(|_| "monotonic time exceeds nanosecond range".into())
 }
 
 /// Read at most limit + 1 bytes so oversized files can be rejected without loading them.

@@ -1,5 +1,5 @@
 //! Exercises the real parser process through atomic file publication and inotify.
-use multiload_qubes::metrics::QubeIdentity;
+use multiload_qubes::metrics::{handoff::monotonic_ns, QubeIdentity};
 use multiload_qubes_snapshot::{unix_time_now, Snapshot};
 use serde_json::json;
 use std::cell::Cell;
@@ -72,7 +72,7 @@ impl Fixture {
             "cpu":25,"qube_cpu":null,"disk":null,
             "dom0_ram":[1000,100],"dom0_swap":[100,50],
         });
-        let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline":now()+wait,"expected":expected},"sample":sample,"memory_enabled":memory,"network_identity":identity(1, "uuid-1")});
+        let frame = json!({"tick":{"tick_id":self.tick_id(),"deadline_ns":monotonic_ns().unwrap() + Duration::from_secs_f64(wait).as_nanos() as u64,"expected":expected},"sample":sample,"memory_enabled":memory,"network_identity":identity(1, "uuid-1")});
         self.write("host.json", &serde_json::to_vec(&frame).unwrap());
         timestamp
     }
@@ -98,7 +98,7 @@ impl Fixture {
         timestamp: f64,
         bytes: &[u8],
     ) {
-        self.write(&format!("raw/{file}"),&serde_json::to_vec(&json!({"tick_id":tick_id,"identity":identity,"session":session,"timestamp":timestamp,"payload":bytes})).unwrap());
+        self.write(&format!("raw/{file}"),&serde_json::to_vec(&json!({"tick_id":tick_id,"identity":identity,"session":session,"timestamp":timestamp,"received_ns":monotonic_ns().unwrap(),"payload":bytes})).unwrap());
     }
     fn start(&mut self) {
         let _ = fs::remove_file(self.path.join("metrics"));
@@ -237,6 +237,65 @@ fn deadline_publishes_partial_data_and_late_replies_do_not_change_it() {
         f.wait(next).network.is_none(),
         "an old reply cannot satisfy the next tick"
     );
+    f.stop();
+}
+
+#[test]
+fn receipt_cutoff_uses_monotonic_nanoseconds_not_unix_timestamp_order() {
+    for (late_ns, expected_used) in [(0, 700), (1, 100)] {
+        let mut f = Fixture::new();
+        let stamp = f.begin_at(now() - 1.0, &["memory-1"], 1.0, true, 0.5);
+        let mut host: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.path.join("host.json")).unwrap()).unwrap();
+        // Put the cutoff in the past, so startup immediately closes this tick.
+        let deadline_ns = monotonic_ns().unwrap() - 1_000_000;
+        host["tick"]["deadline_ns"] = json!(deadline_ns);
+        f.write("host.json", &serde_json::to_vec(&host).unwrap());
+        // This Unix receipt time is older than the host sample, as it could be
+        // after a backward clock step. It must not decide whether the reply was late.
+        f.raw_for(
+            "memory-1",
+            &f.tick_id(),
+            identity(1, "uuid-1"),
+            "a",
+            now() - 2.0,
+            MEMORY,
+        );
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.path.join("raw/memory-1")).unwrap()).unwrap();
+        raw["received_ns"] = json!(deadline_ns + late_ns);
+        f.write("raw/memory-1", &serde_json::to_vec(&raw).unwrap());
+        f.start();
+        assert_eq!(f.wait(stamp).used, expected_used);
+        f.stop();
+    }
+}
+
+#[test]
+fn repeated_unix_receipt_times_do_not_reuse_old_network_readings() {
+    let mut f = Fixture::new();
+    let receipt_time = now();
+    let stamp = f.begin(&["network"], 1.0, true);
+    f.raw_for(
+        "network",
+        &f.tick_id(),
+        identity(1, "uuid-1"),
+        "a",
+        receipt_time,
+        NETWORK,
+    );
+    f.start();
+    assert!(f.wait(stamp).network.is_none());
+    let stamp = f.begin(&["network"], 1.0, true);
+    f.raw_for(
+        "network",
+        &f.tick_id(),
+        identity(1, "uuid-1"),
+        "a",
+        receipt_time,
+        b"N1 1500000000 12345678-1234-1234-1234-123456789abc 1:600:200",
+    );
+    assert_eq!(f.wait(stamp).network, Some((1000.0, 0.0)));
     f.stop();
 }
 

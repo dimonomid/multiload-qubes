@@ -4,7 +4,7 @@
 //! sampling loop reserves requests; workers save raw replies without parsing
 //! their measurements or making the sampling loop wait for guest I/O.
 use super::diagnostics::StderrCapture;
-use crate::metrics::handoff::{RawFrame, MAX_REPORT_BYTES};
+use crate::metrics::handoff::{monotonic_ns, RawFrame, MAX_REPORT_BYTES};
 use crate::metrics::publish_bytes;
 use crate::metrics::{QubeIdentity, ReporterKey};
 use nix::errno::Errno;
@@ -67,6 +67,7 @@ impl RawTarget {
             tick_id: tick_id.into(),
             identity: self.identity.clone(),
             session: session.into(),
+            received_ns: monotonic_ns()?,
             timestamp: multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?,
             payload: payload.into(),
         };
@@ -859,11 +860,13 @@ mod tests {
         );
         assert!(!first.session.is_empty());
         assert!(first.timestamp > 0.0);
+        assert!(first.received_ns > 0);
         request_when_ready(&reader, "second-tick");
         let second = attempts.frame("second-tick");
         assert_eq!(second.payload, first.payload);
         assert_eq!(second.session, first.session);
         assert!(second.timestamp >= first.timestamp);
+        assert!(second.received_ns >= first.received_ns);
         assert_eq!(attempts.pids().len(), 1);
         drop(reader);
         attempts.assert_reaped();

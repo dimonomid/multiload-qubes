@@ -18,10 +18,10 @@ struct Report {
     /// Connection key; changing it discards the old network baseline.
     session: String,
     /// Receipt time of the last parsed frame, used to avoid parsing it twice.
-    timestamp: f64,
+    received_ns: Option<u64>,
     /// Protocol checks and previous network counters.
     tracker: Tracker,
-    /// Result for timestamp; None also covers valid network warmup.
+    /// Result for received_ns; None also covers valid network warmup.
     reading: Option<Reading>,
     /// Last logged parse error, so repeated failures do not flood the journal.
     last_error: Option<String>,
@@ -51,9 +51,6 @@ impl PendingTick {
         frame.sample.validate()?;
         multiload_qubes_snapshot::check_freshness(frame.sample.timestamp, frame.sample.period, now)
             .map_err(|e| e.to_string())?;
-        if !frame.tick.deadline.is_finite() {
-            return Err("invalid tick deadline".into());
-        }
         Ok(Self {
             frame,
             replies: BTreeMap::new(),
@@ -86,7 +83,7 @@ impl Parser {
         let report = self.reports.entry(key).or_insert_with(|| Report {
             identity: frame.identity.clone(),
             session: frame.session.clone(),
-            timestamp: 0.0,
+            received_ns: None,
             tracker: Tracker::new(key),
             reading: None,
             last_error: None,
@@ -95,14 +92,14 @@ impl Parser {
             *report = Report {
                 identity: frame.identity,
                 session: frame.session,
-                timestamp: 0.0,
+                received_ns: None,
                 tracker: Tracker::new(key),
                 reading: None,
                 last_error: None,
             };
         }
-        if report.timestamp != frame.timestamp {
-            report.timestamp = frame.timestamp;
+        if report.received_ns != Some(frame.received_ns) {
+            report.received_ns = Some(frame.received_ns);
             report.reading = match report.tracker.update(&frame.payload) {
                 Ok(reading) => {
                     if reading.is_some() && report.last_error.take().is_some() {
@@ -144,9 +141,13 @@ impl Parser {
         let Ok(now) = unix_time_now() else {
             return;
         };
+        let Ok(now_ns) = handoff::monotonic_ns() else {
+            return;
+        };
         if frame.tick_id != pending.frame.tick.tick_id
             || frame.identity != *identity
-            || frame.timestamp > pending.frame.tick.deadline
+            || frame.received_ns > pending.frame.tick.deadline_ns
+            || frame.received_ns > now_ns
             || !handoff::fresh(
                 frame.timestamp,
                 now,
@@ -260,9 +261,7 @@ pub fn run(options: Options) -> Result<(), String> {
                     parser.ingest(&options.input, tick, *key);
                 }
             }
-            if tick.complete()
-                || unix_time_now().map_err(|e| e.to_string())? >= tick.frame.tick.deadline
-            {
+            if tick.complete() || handoff::monotonic_ns()? >= tick.frame.tick.deadline_ns {
                 // One last bounded scan covers notifications not read yet. Only
                 // reports stamped before the deadline can contribute.
                 if !tick.complete() {
@@ -278,11 +277,15 @@ pub fn run(options: Options) -> Result<(), String> {
         if now > fresh_until {
             let _ = std::fs::remove_file(&options.output);
         }
-        // Use integer milliseconds rather than Duration here because poll takes that unit.
+        // poll takes milliseconds; round up so a partial millisecond does not spin.
+        let now_ns = handoff::monotonic_ns()?;
         let timeout_ms = pending.as_ref().map_or(1000, |tick| {
-            ((tick.frame.tick.deadline - unix_time_now().unwrap_or(now)).max(0.0) * 1000.0)
-                .ceil()
-                .min(1000.0) as u16
+            tick.frame
+                .tick
+                .deadline_ns
+                .saturating_sub(now_ns)
+                .div_ceil(1_000_000)
+                .min(1000) as u16
         });
         let mut fds = [PollFd::new(watch.as_fd(), PollFlags::POLLIN)];
         match poll(&mut fds, timeout_ms) {

@@ -292,9 +292,11 @@ pub fn run(options: Options) -> Result<(), String> {
             // Start the shared reply window after Xen sampling and connection
             // setup, so neither uses up the time available to qubes. Requests
             // run in parallel with the remaining dom0 collection below.
-            // Use Unix seconds because this deadline is written to a file for the parser to read.
-            let deadline = multiload_qubes_snapshot::unix_time_now().map_err(|e| e.to_string())?
-                + handoff::TICK_REPLY_WINDOW.as_secs_f64();
+            // Both services use the same host monotonic clock, so changing the
+            // wall clock cannot shorten or extend this reply window.
+            let deadline_ns = handoff::monotonic_ns()?
+                .checked_add(handoff::TICK_REPLY_WINDOW.as_nanos() as u64)
+                .ok_or("reply deadline overflow")?;
             let expected = reporters.request(&tick_id);
             let meminfo = fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
             let network_identity = eligible(&host)
@@ -314,7 +316,7 @@ pub fn run(options: Options) -> Result<(), String> {
             let frame = handoff::HostFrame {
                 tick: handoff::Tick {
                     tick_id,
-                    deadline,
+                    deadline_ns,
                     expected,
                 },
                 sample,
