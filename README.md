@@ -30,7 +30,7 @@ Charts can be reordered and enabled/disabled individually; all colors are config
 
 The project runs two systemd services and an XFCE panel plugin in dom0:
 
-- The collector service reads Xen and dom0 statistics, and runs fixed Python
+- The collector service reads Xen and dom0 statistics, and runs fixed
   reporters in Linux qubes. It writes host statistics and raw guest reports
   (without parsing their measurement fields) under `/run/multiload-qubes-host/`.
 - The parser service runs as the dedicated `multiload-qubes` user. It watches
@@ -45,7 +45,7 @@ Nothing needs to be installed in the qubes.
 The collector service runs as root in dom0, has Xen and Qubes access, and is
 designed to do absolute minimum that a privileged service has to do: collects
 data from Xen, collects untrusted data from VMs without parsing their
-measurement fields (using python scripts bundled with the application), and
+measurement fields (using scripts bundled with the application), and
 stores both kinds of data on disk. These files and their directory are owned
 by root and are not writable by others; VMs cannot choose their paths or
 identities.

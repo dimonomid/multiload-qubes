@@ -41,10 +41,10 @@ const REPORTS_PER_SECOND: f64 = 4.0;
 // Maximum saved reply budget, allowing a short burst before the rate limit disconnects.
 const REPORT_BURST: f64 = 8.0;
 
-pub const METRICS_SCRIPT: &str = include_str!("../../../guest/metrics.py");
+pub const METRICS_SCRIPT: &str = include_str!("../../../guest/metrics.sh");
 pub const NETWORK_SCRIPT: &str = include_str!("../../../guest/network.py");
 
-/// Quote the fixed Python source as one argument to the guest shell.
+/// Quote the fixed script source as one argument to its interpreter.
 pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
@@ -91,9 +91,9 @@ pub struct CommandSpec {
 impl CommandSpec {
     /// Open only the bundled reporter; do not allow guest data to choose a command.
     pub fn qube(name: &str, key: ReporterKey) -> Self {
-        let script = match key {
-            ReporterKey::QubeMetrics(_) => METRICS_SCRIPT,
-            ReporterKey::Network => NETWORK_SCRIPT,
+        let (interpreter, script) = match key {
+            ReporterKey::QubeMetrics(_) => ("/bin/sh -c", METRICS_SCRIPT),
+            ReporterKey::Network => ("python3 -u -c", NETWORK_SCRIPT),
         };
         Self {
             source: format!(
@@ -113,7 +113,7 @@ impl CommandSpec {
             ],
             // This is the VMShell startup used by qvm-run, without keeping its
             // Python wrapper alive. exec leaves stdin connected to the reporter.
-            input: format!("exec python3 -u -c {}\n", shell_quote(script)).into_bytes(),
+            input: format!("exec {interpreter} {}\n", shell_quote(script)).into_bytes(),
         }
     }
 }
@@ -1352,21 +1352,31 @@ mod tests {
     }
     #[test]
     fn shell_startup_leaves_stdin_available_for_repeated_sample_requests() {
-        let attempts = Attempts::new();
-        let mut command = CommandSpec::qube("sys-net", ReporterKey::Network);
-        // Stand in for qubes.VMShell locally, running the actual bundled script.
-        command.program = "/bin/sh".into();
-        command.args.clear();
-        let reader = Reader::spawn(command, Timing::default(), attempts.target()).unwrap();
-        assert!(!attempts.0.join("raw").exists());
-        request_when_ready(&reader, "first");
-        let first = attempts.frame("first");
-        assert!(first.payload.starts_with(b"N1 "));
-        request_when_ready(&reader, "second");
-        let second = attempts.frame("second");
-        assert!(second.payload.starts_with(b"N1 "));
-        assert_eq!(first.session, second.session);
-        drop(reader);
+        for (key, prefix) in [
+            (ReporterKey::QubeMetrics(23), b"M2 23 ".as_slice()),
+            (ReporterKey::Network, b"N1 ".as_slice()),
+        ] {
+            let attempts = Attempts::new();
+            let mut command = CommandSpec::qube("dev", key);
+            // Stand in for qubes.VMShell locally, running the actual bundled scripts.
+            command.program = "/bin/sh".into();
+            command.args.clear();
+            // CI has no XenStore; only replace the one startup lookup.
+            command.input = String::from_utf8(command.input)
+                .unwrap()
+                .replace("$(xenstore-read domid)", "23")
+                .into_bytes();
+            let reader = Reader::spawn(command, Timing::default(), attempts.target()).unwrap();
+            assert!(!attempts.0.join("raw").exists());
+            request_when_ready(&reader, "first");
+            let first = attempts.frame("first");
+            assert!(first.payload.starts_with(prefix));
+            request_when_ready(&reader, "second");
+            let second = attempts.frame("second");
+            assert!(second.payload.starts_with(prefix));
+            assert_eq!(first.session, second.session);
+            drop(reader);
+        }
     }
 
     #[test]
@@ -1424,9 +1434,19 @@ mod tests {
     #[test]
     fn qubes_command_uses_native_client_and_default_user_without_autostart() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-        for (name, key, script) in [
-            ("dev", ReporterKey::QubeMetrics(23), METRICS_SCRIPT),
-            ("sys-net", ReporterKey::Network, NETWORK_SCRIPT),
+        for (name, key, interpreter, script) in [
+            (
+                "dev",
+                ReporterKey::QubeMetrics(23),
+                "/bin/sh -c",
+                METRICS_SCRIPT,
+            ),
+            (
+                "sys-net",
+                ReporterKey::Network,
+                "python3 -u -c",
+                NETWORK_SCRIPT,
+            ),
         ] {
             let cmd = CommandSpec::qube(name, key);
             assert_eq!(cmd.program, "/usr/lib/qubes/qrexec-client");
@@ -1436,7 +1456,7 @@ mod tests {
             );
             assert_eq!(
                 cmd.input,
-                format!("exec python3 -u -c {}\n", shell_quote(script)).as_bytes()
+                format!("exec {interpreter} {}\n", shell_quote(script)).as_bytes()
             );
         }
         assert_eq!(
