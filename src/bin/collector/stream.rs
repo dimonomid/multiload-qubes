@@ -1,6 +1,6 @@
 //! Keeps one guest reporting connection open and retries when it fails.
 //!
-//! Each reader owns a worker thread and a local qvm-run process group. The
+//! Each reader owns a worker thread and a local qrexec-client process group. The
 //! sampling loop reserves requests; workers save raw replies without parsing
 //! their measurements or making the sampling loop wait for guest I/O.
 use super::diagnostics::StderrCapture;
@@ -81,10 +81,12 @@ impl RawTarget {
 pub struct CommandSpec {
     /// Human-readable source in diagnostics, separate from executable arguments.
     pub source: String,
-    /// Local executable, normally qvm-run.
+    /// Local executable, normally the native qrexec-client.
     pub program: String,
-    /// Arguments including the fixed guest script and validated qube name.
+    /// Arguments selecting the fixed service and validated qube name.
     pub args: Vec<String>,
+    /// Fixed shell command sent once, before sample requests, on each new connection.
+    pub input: Vec<u8>,
 }
 impl CommandSpec {
     /// Open only the bundled reporter; do not allow guest data to choose a command.
@@ -101,14 +103,17 @@ impl CommandSpec {
                     ReporterKey::Network => "network",
                 }
             ),
-            program: "qvm-run".into(),
+            program: "/usr/lib/qubes/qrexec-client".into(),
+            // DEFAULT uses the qube's configured user. The native client connects
+            // to its existing qrexec daemon; it does not start or unpause qubes.
             args: vec![
-                "--pass-io".into(),
-                "--no-gui".into(),
-                "--no-autostart".into(),
+                "-d".into(),
                 name.into(),
-                format!("python3 -u -c {}", shell_quote(script)),
+                "DEFAULT:QUBESRPC qubes.VMShell dom0".into(),
             ],
+            // This is the VMShell startup used by qvm-run, without keeping its
+            // Python wrapper alive. exec leaves stdin connected to the reporter.
+            input: format!("exec python3 -u -c {}\n", shell_quote(script)).into_bytes(),
         }
     }
 }
@@ -130,7 +135,7 @@ impl Default for Timing {
     }
 }
 
-// Signal the local qvm-run process group on error or stop. Descendants that
+// Signal the local qrexec-client process group on error or stop. Descendants that
 // leave the group are outside this cleanup. Bundled guest scripts exit when
 // their stdin closes (or a write sees a broken pipe).
 struct Process(Child);
@@ -399,6 +404,41 @@ fn wait(fds: &mut [PollFd<'_>], deadline: Option<Instant>) -> Result<(), Errno> 
     }
 }
 
+/// Send the fixed startup command without letting pipe backpressure delay shutdown.
+/// Return false if shutdown interrupts startup.
+fn start_reporter(
+    stdin: &mut std::process::ChildStdin,
+    mut input: &[u8],
+    requested: &Requests,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    while !input.is_empty() {
+        requested.clear_notification().map_err(|e| e.to_string())?;
+        if stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            return Err("reporter startup timed out".into());
+        }
+        match stdin.write(input) {
+            Ok(0) => return Err("reporter startup pipe closed".into()),
+            Ok(n) => input = &input[n..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let mut fds = [
+                    PollFd::new(requested.wake.as_fd(), PollFlags::POLLIN),
+                    PollFd::new(stdin.as_fd(), PollFlags::POLLOUT),
+                ];
+                wait(&mut fds, Some(deadline)).map_err(|e| e.to_string())?;
+            }
+            Err(error) => return Err(format!("cannot start guest reporter: {error}")),
+        }
+    }
+    Ok(true)
+}
+
 /// Run one connection until stop or failure; only framing and traffic limits are checked here.
 fn session(
     spec: &CommandSpec,
@@ -433,8 +473,11 @@ fn session(
     let mut stderr = proc.0.stderr.take().ok_or("missing stderr")?;
     set_nonblocking(&stderr).map_err(|e| e.to_string())?;
     let mut captured = StderrCapture::default();
-    requested.ready();
     let result = (|| -> Result<(), String> {
+        if !start_reporter(&mut stdin, &spec.input, requested, stop, timing.stale)? {
+            return Ok(());
+        }
+        requested.ready();
         let mut buffer = Vec::new();
         let mut chunk = [0; 4096];
         let mut pending: Option<(String, Instant)> = None;
@@ -732,6 +775,7 @@ mod tests {
             source: "test RAM".into(),
             program: "python3".into(),
             args: vec!["-u".into(), "-c".into(), script.into()],
+            input: Vec::new(),
         }
     }
     fn timing() -> Timing {
@@ -1307,14 +1351,98 @@ mod tests {
         attempts.assert_reaped();
     }
     #[test]
-    fn qubes_command_never_autostarts() {
+    fn shell_startup_leaves_stdin_available_for_repeated_sample_requests() {
+        let attempts = Attempts::new();
+        let mut command = CommandSpec::qube("sys-net", ReporterKey::Network);
+        // Stand in for qubes.VMShell locally, running the actual bundled script.
+        command.program = "/bin/sh".into();
+        command.args.clear();
+        let reader = Reader::spawn(command, Timing::default(), attempts.target()).unwrap();
+        assert!(!attempts.0.join("raw").exists());
+        request_when_ready(&reader, "first");
+        let first = attempts.frame("first");
+        assert!(first.payload.starts_with(b"N1 "));
+        request_when_ready(&reader, "second");
+        let second = attempts.frame("second");
+        assert!(second.payload.starts_with(b"N1 "));
+        assert_eq!(first.session, second.session);
+        drop(reader);
+    }
+
+    #[test]
+    fn startup_is_sent_once_per_connection_and_again_after_reconnect() {
+        let attempts = Attempts::new();
+        let mut command = spec(&attempts.script("import sys\nassert sys.stdin.readline() == 'start\\n'\nfor _ in range(2):\n assert sys.stdin.readline() == 'sample\\n'\n print('opaque reply',flush=True)"));
+        command.input = b"start\n".to_vec();
+        let reader = Reader::spawn(command, timing(), attempts.target()).unwrap();
+        request_when_ready(&reader, "first");
+        let first = attempts.frame("first");
+        request_when_ready(&reader, "second");
+        assert_eq!(attempts.frame("second").session, first.session);
+        await_failure(&reader);
+        request_when_ready(&reader, "third");
+        let third = attempts.frame("third");
+        assert_eq!(third.payload, b"opaque reply");
+        assert_ne!(third.session, first.session);
+        drop(reader);
+        assert_eq!(attempts.pids().len(), 2);
+        attempts.assert_reaped();
+    }
+
+    #[test]
+    fn blocked_startup_times_out_and_shutdown_interrupts_its_pipe_wait() {
+        for timeout in [true, false] {
+            let attempts = Attempts::new();
+            let mut command = spec(&attempts.script("time.sleep(30)"));
+            // More than a pipe can hold: the child deliberately never reads stdin.
+            command.input = vec![b'x'; 2 * 1024 * 1024];
+            let reader = Reader::spawn(
+                command,
+                Timing {
+                    stale: if timeout {
+                        Duration::from_millis(150)
+                    } else {
+                        Duration::from_secs(30)
+                    },
+                    retry: Duration::from_secs(30),
+                },
+                attempts.target(),
+            )
+            .unwrap();
+            attempts.wait_started();
+            assert!(!reader.request("before-startup-finished"));
+            if timeout {
+                assert!(await_failure(&reader).contains("startup timed out"));
+            }
+            let stopped = Instant::now();
+            drop(reader);
+            assert!(stopped.elapsed() < Duration::from_secs(1));
+            attempts.assert_reaped();
+        }
+    }
+
+    #[test]
+    fn qubes_command_uses_native_client_and_default_user_without_autostart() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-        let cmd = CommandSpec::qube("dev", ReporterKey::QubeMetrics(23));
-        assert_eq!(cmd.program, "qvm-run");
-        assert!(cmd.args.iter().any(|s| s == "--no-autostart"));
-        assert!(cmd.args.iter().any(|s| s == "--no-gui"));
-        assert!(cmd.args.last().unwrap().contains("xenstore-read"));
-        assert_eq!(cmd.source, "dev RAM");
+        for (name, key, script) in [
+            ("dev", ReporterKey::QubeMetrics(23), METRICS_SCRIPT),
+            ("sys-net", ReporterKey::Network, NETWORK_SCRIPT),
+        ] {
+            let cmd = CommandSpec::qube(name, key);
+            assert_eq!(cmd.program, "/usr/lib/qubes/qrexec-client");
+            assert_eq!(
+                cmd.args,
+                ["-d", name, "DEFAULT:QUBESRPC qubes.VMShell dom0"]
+            );
+            assert_eq!(
+                cmd.input,
+                format!("exec python3 -u -c {}\n", shell_quote(script)).as_bytes()
+            );
+        }
+        assert_eq!(
+            CommandSpec::qube("dev", ReporterKey::QubeMetrics(23)).source,
+            "dev RAM"
+        );
         assert_eq!(
             CommandSpec::qube("sys-net", ReporterKey::Network).source,
             "sys-net network"

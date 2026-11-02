@@ -13,7 +13,7 @@ BuildRequires:  systemd-rpm-macros
 Requires(pre):  /usr/bin/systemd-sysusers
 Requires:       xfce4-panel
 Requires:       xen-libs
-Requires:       /usr/bin/qvm-run
+Requires:       /usr/lib/qubes/qrexec-client
 %{?systemd_requires}
 
 %description

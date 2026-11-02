@@ -188,7 +188,7 @@ impl HostSample {
 pub struct Qube {
     /// Both parts must match before reusing a connection.
     pub identity: QubeIdentity,
-    /// Validated name passed to qvm-run.
+    /// Validated name passed to qrexec-client.
     pub name: String,
 }
 /// Choose running domains that can host the bundled Linux reporters.
