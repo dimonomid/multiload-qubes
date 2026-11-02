@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/dimonomid/multiload-qubes/compare/v0.2.0...v0.2.1) (2026-11-02)
+
+
+### Performance Improvements
+
+* launch qrexec-client directly for guest reporting ([f486596](https://github.com/dimonomid/multiload-qubes/commit/f4865961b8c1f89ed499a473170cd4fdc293c91a))
+* use a shell qube reporter instead of Python ([29386ea](https://github.com/dimonomid/multiload-qubes/commit/29386eadb74a020feb5b20e47313a05b2c29b3a7))
+
 ## [0.2.0](https://github.com/dimonomid/multiload-qubes/compare/v0.1.0...v0.2.0) (2026-11-01)
 
 ### Security improvements
