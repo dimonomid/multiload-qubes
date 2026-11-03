@@ -1,4 +1,10 @@
 # Run inside a Linux qube. Shell built-ins handle each sample without child processes.
+# We use /bin/sh rather than Python to save RAM in every monitored qube.
+# In one five-minute test at one sample per second, private RAM per qube fell
+# from about 6 MiB to 304 KiB. That saves about 5.7 MiB for each monitored qube,
+# so the saving grows with the number of qubes. CPU per qube rose from about
+# 0.053% to 0.12% of one core; we accept that small CPU cost to save RAM.
+# No Bash-only features are needed.
 set -eu
 domid=$(xenstore-read domid)
 

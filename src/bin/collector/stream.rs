@@ -92,6 +92,9 @@ impl CommandSpec {
     /// Open only the bundled reporter; do not allow guest data to choose a command.
     pub fn qube(name: &str, key: ReporterKey) -> Self {
         let (interpreter, script) = match key {
+            // In one test, the shell reporter used 304 KiB of private RAM per
+            // qube instead of Python's roughly 6 MiB. The saving adds up across
+            // monitored qubes. See metrics.sh for the measured CPU tradeoff.
             ReporterKey::QubeMetrics(_) => ("/bin/sh -c", METRICS_SCRIPT),
             ReporterKey::Network => ("python3 -u -c", NETWORK_SCRIPT),
         };
@@ -103,6 +106,10 @@ impl CommandSpec {
                     ReporterKey::Network => "network",
                 }
             ),
+            // We don't use qvm-run because it keeps a Python wrapper alive for
+            // each connection. Calling the native client avoids that cost. In one dom0 test,
+            // each extra qube added about 15-20 MB to service memory with
+            // qvm-run. Avoiding that overhead matters as more qubes are monitored.
             program: "/usr/lib/qubes/qrexec-client".into(),
             // DEFAULT uses the qube's configured user. The native client connects
             // to its existing qrexec daemon; it does not start or unpause qubes.
